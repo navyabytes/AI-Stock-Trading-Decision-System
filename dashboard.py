@@ -152,14 +152,35 @@ def section(icon, title, subtitle=""):
 
 @st.cache_data(ttl=300)
 def fetch_stock(ticker="RELIANCE.NS", period="2y"):
-    """Download OHLCV data with flattened columns."""
-    df = yf.download(ticker, period=period, auto_adjust=True)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    df.reset_index(inplace=True)
-    df["Date"] = pd.to_datetime(df["Date"])
-    return df
+    """
+    Safe stock downloader for Streamlit Cloud deployment
+    """
 
+    try:
+        df = yf.download(
+            ticker,
+            period=period,
+            interval="1d",
+            auto_adjust=True,
+            progress=False,
+            threads=False
+        )
+
+        if df.empty:
+            st.warning("⚠️ No stock data fetched from Yahoo Finance.")
+            return pd.DataFrame()
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        df.reset_index(inplace=True)
+        df["Date"] = pd.to_datetime(df["Date"])
+
+        return df
+
+    except Exception as e:
+        st.warning(f"⚠️ Stock fetch failed: {str(e)}")
+        return pd.DataFrame()
 
 @st.cache_data(ttl=300)
 def fetch_live_quote(ticker="RELIANCE.NS"):
