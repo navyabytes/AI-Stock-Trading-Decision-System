@@ -327,8 +327,18 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 with st.spinner("Fetching live market data…"):
     stock_df = fetch_stock("RELIANCE.NS", period=lookback)
+
+    if stock_df.empty:
+        st.error("❌ Unable to fetch RELIANCE.NS live market data from Yahoo Finance.")
+        st.stop()
+
     stock_df = compute_technicals(stock_df)
-    latest   = stock_df.iloc[-1]
+
+    if stock_df.empty:
+        st.error("❌ Technical indicator calculation failed.")
+        st.stop()
+
+    latest = stock_df.iloc[-1]
 
 try:
     live = fetch_live_quote("RELIANCE.NS")
