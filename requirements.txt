@@ -4,6 +4,4 @@ numpy
 yfinance
 scikit-learn
 feedparser
-transformers
-torch==2.0.0
 nltk
