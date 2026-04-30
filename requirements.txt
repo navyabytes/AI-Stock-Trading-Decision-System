@@ -4,3 +4,6 @@ numpy
 plotly
 yfinance
 scikit-learn
+feedparser
+transformers
+torch
