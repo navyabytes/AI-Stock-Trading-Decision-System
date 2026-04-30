@@ -218,16 +218,14 @@ def clean_news(
 
 @st.cache_resource(show_spinner=False)
 def _load_finbert():
-    """Load FinBERT once and cache for session lifetime."""
-    if not FINBERT_OK:
+    if not FINBERT_OK or hf_pipeline is None:
         return None
     try:
         clf = hf_pipeline(
             "text-classification",
-            model=FINBERT_MODEL,
-            top_k=None,         # Return all 3 class scores
-            truncation=True,
-            max_length=512,
+            model="ProsusAI/finbert",
+            top_k=None,
+            truncation=True
         )
         return clf
     except Exception:
@@ -252,7 +250,7 @@ def _finbert_score(clf, title: str) -> float:
     Returns float in [-1, +1], or 0.0 on failure.
     """
     if clf is None:
-        return 0.0
+        return 0.0 * len(titles)
     try:
         results = clf(title)
         # results is list of list of dicts: [[{label, score}, ...]]
