@@ -1,3 +1,10 @@
+import nltk
+
+try:
+    nltk.data.find('sentiment/vader_lexicon')
+except LookupError:
+    nltk.download('vader_lexicon')
+
 """
 ================================================================================
 SENTIMENT PIPELINE MODULE — AI Stock Trading Decision Support System
