@@ -499,8 +499,11 @@ def adjust_prediction_with_sentiment(
     if delta is None:
         delta = 0.0
     
-    # Ensure numeric
-    model_confidence = float(model_confidence)
+    # Ensure numeric safely
+    try:
+        model_confidence = float(model_confidence)
+    except (TypeError, ValueError):
+        model_confidence = 50.0
     delta = float(delta)
     
     adjusted_conf = float(np.clip(model_confidence + delta, 0.0, 98.0))
