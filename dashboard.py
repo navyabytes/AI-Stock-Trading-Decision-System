@@ -492,6 +492,17 @@ def adjust_prediction_with_sentiment(
                 f"while news sentiment leans {sent_label.lower()}."
             )
 
+    # Safety check
+    if model_confidence is None:
+        model_confidence = 50.0
+    
+    if delta is None:
+        delta = 0.0
+    
+    # Ensure numeric
+    model_confidence = float(model_confidence)
+    delta = float(delta)
+    
     adjusted_conf = float(np.clip(model_confidence + delta, 0.0, 98.0))
 
     return {
