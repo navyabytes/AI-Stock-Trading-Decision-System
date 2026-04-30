@@ -1,3 +1,4 @@
+import streamlit as st
 import nltk
 
 try:
@@ -16,7 +17,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-import streamlit as st
+
 
 warnings.filterwarnings("ignore")
 
