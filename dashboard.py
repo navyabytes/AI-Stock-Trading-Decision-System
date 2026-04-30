@@ -1046,6 +1046,6 @@ def main():
     scored = score_sentiment(clean)
     agg = aggregate_sentiment(scored)
 
-    render_sentiment_section(scored, agg)
+    render_sentiment_section(model_signal, model_confidence)
 
 main()
