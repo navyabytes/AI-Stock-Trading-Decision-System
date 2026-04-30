@@ -1,12 +1,13 @@
 import streamlit as st
 import nltk
+from sentiment_pipeline import *
 
 try:
     nltk.data.find('sentiment/vader_lexicon')
 except LookupError:
     nltk.download('vader_lexicon')
 
-st.title("📊 AI Stock Trading Dashboard")
+run_dashboard()
 
 import re
 import time
@@ -842,3 +843,15 @@ def render_sentiment_section(
         """,
         unsafe_allow_html=True,
     )
+
+def main():
+    st.title("📊 AI Stock Trading Dashboard")
+
+    news = fetch_news()
+    clean = clean_news(news)
+    scored = score_sentiment(clean)
+    agg = aggregate_sentiment(scored)
+
+    render_sentiment_section(scored, agg)
+
+main()
