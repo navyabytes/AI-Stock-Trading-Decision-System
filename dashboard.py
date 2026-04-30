@@ -1041,11 +1041,9 @@ def render_sentiment_section(
 def main():
     st.title("📊 AI Stock Trading Dashboard")
 
-    news = fetch_news()
-    clean = clean_news(news)
-    scored = score_sentiment(clean)
-    agg = aggregate_sentiment(scored)
-
-    render_sentiment_section(model_signal, model_confidence)
+    render_sentiment_section(
+        model_signal="HOLD",
+        model_confidence=50.0,
+    )
 
 main()
