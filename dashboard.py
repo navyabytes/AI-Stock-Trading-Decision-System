@@ -547,174 +547,341 @@ def render_sentiment_section(
     model_confidence: float = 50.0,
 ):
     """
-    Drop-in replacement for the Sentiment Analysis section in dashboard.py.
-
-    Usage in dashboard.py (inside the `elif nav == "🗞️ Sentiment Analysis":` block):
-
-        from sentiment_pipeline import render_sentiment_section
-        render_sentiment_section(live_signal, live_conf)
+    Clean fintech-grade Sentiment Analysis dashboard section.
+    Drop-in replacement — same signature, fully refactored UI only.
     """
     import plotly.graph_objects as go
+    from datetime import datetime
 
-    # ── Run pipeline ─────────────────────────────────────────────────────────
-    with st.spinner("🔄 Fetching live news & running NLP models…"):
+    # ── Run pipeline ──────────────────────────────────────────────────────────
+    with st.spinner("Fetching live news & running sentiment models…"):
         agg = run_sentiment_pipeline()
 
-    articles = agg.get("articles", [])
-    no_data  = agg["total_articles"] == 0
-
-    # ── Reconcile with ML prediction ─────────────────────────────────────────
+    articles   = agg.get("articles", [])
+    no_data    = agg["total_articles"] == 0
     reconciled = adjust_prediction_with_sentiment(model_signal, model_confidence, agg)
 
-    # ── Summary Metrics Row ───────────────────────────────────────────────────
-    mc1, mc2, mc3, mc4 = st.columns(4)
+    # ── Design tokens ─────────────────────────────────────────────────────────
+    COLORS = {
+        "Positive": "#10b981",
+        "Negative": "#ef4444",
+        "Neutral":  "#f59e0b",
+        "bg_card":  "#0f172a",
+        "bg_deep":  "#080d18",
+        "border":   "#1e293b",
+        "text_muted": "#64748b",
+        "text_sub":   "#94a3b8",
+        "text_main":  "#e2e8f0",
+    }
+    ALIGN_COLORS = {
+        "Agreement":       "#10b981",
+        "Mild Conflict":   "#f59e0b",
+        "Strong Conflict": "#ef4444",
+        "Neutral":         "#64748b",
+    }
 
-    overall_colors = {"Positive": "#10b981", "Negative": "#ef4444", "Neutral": "#eab308"}
-    oc = overall_colors.get(agg["overall_label"], "#eab308")
+    sentiment_color  = COLORS.get(agg["overall_label"], COLORS["Neutral"])
+    alignment_color  = ALIGN_COLORS.get(reconciled["alignment"], "#64748b")
+    strength_pct     = {"Strong": 92, "Moderate": 62, "Weak": 28}.get(agg["signal_strength"], 40)
 
-    with mc1:
-        st.metric("Articles (24h)", agg["total_articles"])
-    with mc2:
-        st.metric(
-            "Weighted Sentiment",
-            f"{agg['weighted_score']:+.4f}",
-            agg["overall_label"],
-        )
-    with mc3:
-        st.metric(
-            "Distribution",
-            f"🟢{agg['pct_positive']:.0f}% 🔴{agg['pct_negative']:.0f}% ⚪{agg['pct_neutral']:.0f}%",
-        )
-    with mc4:
-        alignment_colors = {
-            "Agreement":      "#10b981",
-            "Mild Conflict":  "#eab308",
-            "Strong Conflict":"#ef4444",
-            "Neutral":        "#64748b",
-        }
-        ac = alignment_colors.get(reconciled["alignment"], "#64748b")
-        st.metric(
-            "Model Alignment",
-            reconciled["alignment"],
-            f"Conf: {reconciled['adjusted_conf']:.1f}% ({reconciled['delta_conf']:+.0f}pp)",
-        )
+    # ── Global style injection ────────────────────────────────────────────────
+    st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
 
-    # ── Conflict Warning ──────────────────────────────────────────────────────
-    if reconciled["warning"]:
-        st.warning(reconciled["warning"])
+    .snt-root { font-family: 'Sora', sans-serif; }
 
-    # ── Overall Sentiment Banner ──────────────────────────────────────────────
-    strength_icon = {"Strong": "🔥", "Moderate": "📊", "Weak": "🌤️"}.get(
-        agg["signal_strength"], "📊"
+    .snt-metric-card {
+        background: #0f172a;
+        border: 1px solid #1e293b;
+        border-radius: 16px;
+        padding: 20px 22px;
+        height: 100%;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+    }
+    .snt-metric-label {
+        font-size: 0.67rem;
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: #475569;
+        margin-bottom: 8px;
+    }
+    .snt-metric-value {
+        font-size: 1.75rem;
+        font-weight: 800;
+        color: #e2e8f0;
+        line-height: 1;
+        margin-bottom: 4px;
+    }
+    .snt-metric-sub {
+        font-size: 0.75rem;
+        color: #64748b;
+    }
+    .snt-main-card {
+        background: linear-gradient(135deg, #0f172a 0%, #0c1628 100%);
+        border: 1px solid #1e293b;
+        border-radius: 20px;
+        padding: 32px 36px;
+        margin: 20px 0 8px;
+        position: relative;
+        overflow: hidden;
+    }
+    .snt-main-card::before {
+        content: '';
+        position: absolute;
+        top: 0; left: 0;
+        width: 4px; height: 100%;
+        border-radius: 20px 0 0 20px;
+    }
+    .snt-headline-card {
+        background: #0f172a;
+        border: 1px solid #1e293b;
+        border-radius: 14px;
+        padding: 16px 18px;
+        margin-bottom: 10px;
+        transition: all 0.2s ease;
+    }
+    .snt-headline-card:hover {
+        border-color: #334155;
+        transform: translateY(-2px);
+        transition: all 0.2s ease;
+    }
+    .snt-badge {
+        display: inline-block;
+        font-size: 0.68rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        padding: 3px 10px;
+        border-radius: 20px;
+        font-family: 'JetBrains Mono', monospace;
+    }
+    .snt-insight-box {
+        background: #0c1628;
+        border: 1px solid #1e3a5f;
+        border-radius: 16px;
+        padding: 22px 26px;
+        margin: 20px 0;
+    }
+    .snt-recon-card {
+        background: #0f172a;
+        border: 1px solid #1e293b;
+        border-radius: 16px;
+        padding: 24px 28px;
+        margin-top: 8px;
+    }
+    .snt-divider {
+        border: none;
+        border-top: 1px solid #1e293b;
+        margin: 28px 0;
+    }
+    .snt-section-title {
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: #475569;
+        margin-bottom: 14px;
+    }
+    </style>
+    <div class="snt-root">
+    """, unsafe_allow_html=True)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # BLOCK 1 — KPI ROW
+    # ═══════════════════════════════════════════════════════════════════
+    k1, k2, k3, k4 = st.columns(4, gap="small")
+
+    with k1:
+        st.markdown(f"""
+        <div class="snt-metric-card">
+            <div class="snt-metric-label">Articles (24h)</div>
+            <div class="snt-metric-value">{agg['total_articles']}</div>
+            <div class="snt-metric-sub">from live RSS feeds</div>
+        </div>""", unsafe_allow_html=True)
+
+    with k2:
+        st.markdown(f"""
+        <div class="snt-metric-card">
+            <div class="snt-metric-label">Overall Sentiment</div>
+            <div class="snt-metric-value" style="color:{sentiment_color}">{agg['overall_label']}</div>
+            <div class="snt-metric-sub">{agg['pct_positive']:.0f}% positive · {agg['pct_negative']:.0f}% negative</div>
+        </div>""", unsafe_allow_html=True)
+
+    with k3:
+        delta_sign = "+" if reconciled["delta_conf"] >= 0 else ""
+        st.markdown(f"""
+        <div class="snt-metric-card">
+            <div class="snt-metric-label">Adjusted Confidence</div>
+            <div class="snt-metric-value">{reconciled['adjusted_conf']:.1f}%</div>
+            <div class="snt-metric-sub">{delta_sign}{reconciled['delta_conf']:.0f}pp from sentiment</div>
+        </div>""", unsafe_allow_html=True)
+
+    with k4:
+        strength_colors = {"Strong": "#10b981", "Moderate": "#f59e0b", "Weak": "#64748b"}
+        sc = strength_colors.get(agg["signal_strength"], "#64748b")
+        st.markdown(f"""
+        <div class="snt-metric-card">
+            <div class="snt-metric-label">Signal Strength</div>
+            <div class="snt-metric-value" style="color:{sc}">{agg['signal_strength']}</div>
+            <div class="snt-metric-sub">weighted score: {agg['weighted_score']:+.3f}</div>
+        </div>""", unsafe_allow_html=True)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # BLOCK 2 — MAIN SENTIMENT CARD
+    # ═══════════════════════════════════════════════════════════════════
+    st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+
+    strength_prose = {
+        "Strong":   "Strong conviction across recent headlines.",
+        "Moderate": "Moderate signal — mixed but directional coverage.",
+        "Weak":     "Low conviction — news sentiment is inconclusive.",
+    }.get(agg["signal_strength"], "")
+
+    outlook_map = {
+        ("Positive", "Strong"):   "Bullish outlook — news momentum supports upside.",
+        ("Positive", "Moderate"): "Cautiously bullish — positive lean in recent coverage.",
+        ("Positive", "Weak"):     "Slight positive tilt — insufficient news volume to confirm.",
+        ("Negative", "Strong"):   "Bearish outlook — consistent negative press.",
+        ("Negative", "Moderate"): "Cautiously bearish — negative tone in recent news.",
+        ("Negative", "Weak"):     "Slight negative tilt — not enough data to confirm.",
+        ("Neutral",  "Strong"):   "Balanced coverage — no clear directional bias.",
+        ("Neutral",  "Moderate"): "Mixed sentiment — market awaiting a catalyst.",
+        ("Neutral",  "Weak"):     "Quiet news cycle — low informational signal.",
+    }
+    one_liner = outlook_map.get(
+        (agg["overall_label"], agg["signal_strength"]),
+        "Sentiment data is being analysed."
     )
-    st.markdown(
-        f"""
-        <div style="
-            background: #111827;
-            border-left: 5px solid {oc};
-            border-radius: 0 14px 14px 0;
-            padding: 18px 24px;
-            margin: 16px 0;
-            display: flex;
-            align-items: center;
-            gap: 20px;
-        ">
-            <div style="font-size: 2.4rem;">{strength_icon}</div>
-            <div>
-                <div style="font-size: 0.72rem; color: #64748b; letter-spacing: 0.1em;
-                            text-transform: uppercase; margin-bottom: 4px;">
-                    Overall Sentiment Signal
+
+    # Confidence ring via SVG
+    r = 28
+    circ = 2 * 3.14159 * r
+    dash_len = (reconciled["adjusted_conf"] / 100) * circ
+
+    st.markdown(f"""
+    <div class="snt-main-card" style="border-left: 4px solid {sentiment_color};">
+        <div style="display:flex; align-items:center; gap:28px; flex-wrap:wrap;">
+
+            <!-- Confidence ring -->
+            <div style="flex-shrink:0; text-align:center;">
+                <svg width="80" height="80" viewBox="0 0 80 80">
+                    <circle cx="40" cy="40" r="{r}" fill="none" stroke="#1e293b" stroke-width="7"/>
+                    <circle cx="40" cy="40" r="{r}" fill="none"
+                        stroke="{sentiment_color}" stroke-width="7"
+                        stroke-dasharray="{dash_len:.1f} {circ:.1f}"
+                        stroke-linecap="round"
+                        transform="rotate(-90 40 40)"/>
+                    <text x="40" y="44" text-anchor="middle"
+                        font-family="Sora,sans-serif" font-size="13"
+                        font-weight="800" fill="{sentiment_color}">
+                        {reconciled['adjusted_conf']:.0f}%
+                    </text>
+                </svg>
+                <div style="font-size:0.65rem; color:#475569; margin-top:2px; letter-spacing:0.06em;">CONFIDENCE</div>
+            </div>
+
+            <!-- Main label -->
+            <div style="flex:1; min-width:180px;">
+                <div style="font-size:0.68rem; font-weight:600; letter-spacing:0.14em;
+                            text-transform:uppercase; color:#475569; margin-bottom:8px;">
+                    Market Sentiment
                 </div>
-                <div style="font-size: 1.5rem; font-weight: 800; color: {oc};">
-                    {agg['signal_strength']} {agg['overall_label']}
+                <div style="font-size:2.4rem; font-weight:800; color:{sentiment_color};
+                            line-height:1; margin-bottom:10px;">
+                    {agg['overall_label']}
                 </div>
-                <div style="font-size: 0.8rem; color: #94a3b8; margin-top: 4px;">
-                    Score: {agg['weighted_score']:+.4f} &nbsp;·&nbsp;
-                    Based on {agg['total_articles']} articles in last 24h &nbsp;·&nbsp;
-                    FinBERT 70% + VADER 30%
+                <div style="font-size:0.88rem; color:#94a3b8; line-height:1.5;">
+                    {one_liner}
                 </div>
             </div>
+
+            <!-- Strength pill -->
+            <div style="flex-shrink:0; text-align:right; min-width:110px;">
+                <div style="font-size:0.68rem; font-weight:600; letter-spacing:0.1em;
+                            text-transform:uppercase; color:#475569; margin-bottom:8px;">
+                    Signal
+                </div>
+                <div style="
+                    display:inline-block;
+                    background: {sentiment_color}18;
+                    border: 1.5px solid {sentiment_color}55;
+                    color: {sentiment_color};
+                    border-radius: 8px;
+                    padding: 8px 16px;
+                    font-size:1.1rem;
+                    font-weight:800;
+                    letter-spacing:0.04em;
+                ">
+                    {agg['signal_strength'].upper()}
+                </div>
+                <div style="font-size:0.72rem; color:#475569; margin-top:8px;">
+                    {agg['total_articles']} articles · 24h window
+                </div>
+            </div>
+
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    </div>
+    """, unsafe_allow_html=True)
 
-    st.markdown("<hr style='border-color:#1e2d4a; margin:20px 0'>", unsafe_allow_html=True)
-
-    # ── Headlines Feed ────────────────────────────────────────────────────────
-    st.markdown("#### 📰 Live Financial Headlines")
+    # ═══════════════════════════════════════════════════════════════════
+    # BLOCK 3 — HEADLINES
+    # ═══════════════════════════════════════════════════════════════════
+    st.markdown("<hr class='snt-divider'>", unsafe_allow_html=True)
+    st.markdown("<div class='snt-section-title'>📰 Live Headlines</div>", unsafe_allow_html=True)
 
     if no_data:
-        st.info("📭 No recent news available. RSS feed returned no results or feedparser is not installed.")
-        st.markdown(
-            """
-            <div class="card" style="border-color:#1e3a5f">
-                <div class="card-title">ℹ️ Setup Note</div>
-                <div style="color:#94a3b8; font-size:0.85rem; line-height:1.7">
-                    Install dependencies: <code>pip install feedparser vaderSentiment transformers torch</code><br>
-                    FinBERT model will be downloaded automatically on first run (~500MB).
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        st.info("No recent news found. Check RSS feeds or install: `pip install feedparser vaderSentiment transformers torch`")
     else:
-        lbl_colors = {"Positive": "#10b981", "Negative": "#ef4444", "Neutral": "#eab308"}
-        border_colors = {"Positive": "#10b981", "Negative": "#ef4444", "Neutral": "#eab308"}
+        badge_bg = {"Positive": "#10b98122", "Negative": "#ef444422", "Neutral": "#f59e0b22"}
+        badge_clr = {"Positive": "#10b981",   "Negative": "#ef4444",   "Neutral": "#f59e0b"}
+        bar_bg = {"Positive": "#10b981",       "Negative": "#ef4444",   "Neutral": "#f59e0b"}
 
         for art in articles:
             lbl   = art["sentiment_label"]
             score = art["combined_score"]
-            clr   = lbl_colors.get(lbl,    "#eab308")
-            bclr  = border_colors.get(lbl, "#1e3a5f")
-            fb    = art.get("finbert_score", 0.0)
-            vd    = art.get("vader_score",   0.0)
+            clr   = badge_clr.get(lbl,  "#f59e0b")
+            bbg   = badge_bg.get(lbl,   "#f59e0b22")
+            bclr  = bar_bg.get(lbl,     "#f59e0b")
+            dt    = art.get("published_dt")
+            ts    = dt.strftime("%d %b, %H:%M UTC") if dt else "—"
+            src   = art.get("source", "Unknown")
+            bar_w = int((score + 1) / 2 * 100)
 
-            # Format timestamp
-            dt = art.get("published_dt")
-            ts = dt.strftime("%d %b %Y, %H:%M UTC") if dt else "Unknown time"
-
-            # Score bar (0–100 mapped from -1..+1)
-            bar_pct = int((score + 1) / 2 * 100)
-            bar_clr = clr
-
-            st.markdown(
-                f"""
-                <div style="
-                    background: #111827;
-                    border-left: 4px solid {bclr};
-                    border-radius: 0 12px 12px 0;
-                    padding: 14px 18px;
-                    margin-bottom: 10px;
-                ">
-                    <div style="color: #e2e8f0; font-size: 0.9rem; font-weight: 600;
-                                margin-bottom: 6px;">{art['title']}</div>
-                    <div style="color: #64748b; font-size: 0.72rem; margin-bottom: 8px;">
-                        🕐 {ts} &nbsp;·&nbsp; 📰 {art.get('source','Unknown')}
+            st.markdown(f"""
+            <div class="snt-headline-card">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:10px;">
+                    <div style="font-size:0.88rem; font-weight:600; line-height:1.45; flex:1;">
+                        <a href="{art.get('url', '#')}" target="_blank"
+                           style="color:#e2e8f0; text-decoration:none;">
+                            {art['title']}
+                        </a>
                     </div>
-                    <div style="height: 6px; background: #1e2d4a; border-radius: 3px;
-                                overflow: hidden; margin-bottom: 8px;">
-                        <div style="height: 100%; width: {bar_pct}%;
-                                    background: {bar_clr}; border-radius: 3px;"></div>
+                    <span class="snt-badge" style="background:{bbg}; color:{clr}; flex-shrink:0;">
+                        {lbl}
+                    </span>
+                </div>
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <div style="font-size:0.7rem; color:#475569; flex-shrink:0;">
+                        {src} · {ts}
                     </div>
-                    <div style="font-size: 0.75rem; display: flex; gap: 16px; flex-wrap: wrap;">
-                        <span>FinBERT: <b style="color:#a78bfa">{fb:+.4f}</b></span>
-                        <span>VADER: <b style="color:#38bdf8">{vd:+.4f}</b></span>
-                        <span>Combined: <b style="color:#e2e8f0">{score:+.4f}</b></span>
-                        <span style="color:{clr}; font-weight:700">{lbl}</span>
+                    <div style="flex:1; height:4px; background:#1e293b; border-radius:2px; overflow:hidden;">
+                        <div style="width:{bar_w}%; height:100%; background:{bclr}; border-radius:2px;"></div>
                     </div>
                 </div>
-                """,
-                unsafe_allow_html=True,
-            )
+            </div>
+            """, unsafe_allow_html=True)
 
-    st.markdown("<hr style='border-color:#1e2d4a; margin:20px 0'>", unsafe_allow_html=True)
+    # ═══════════════════════════════════════════════════════════════════
+    # BLOCK 4 — CHARTS (compact)
+    # ═══════════════════════════════════════════════════════════════════
+    st.markdown("<hr class='snt-divider'>", unsafe_allow_html=True)
+    st.markdown("<div class='snt-section-title'>📊 Sentiment Breakdown</div>", unsafe_allow_html=True)
 
-    # ── Sentiment Distribution Chart ──────────────────────────────────────────
-    col_pie, col_bar = st.columns([1, 1])
+    c_pie, c_bar = st.columns([1, 1.6], gap="medium")
 
-    with col_pie:
-        st.markdown("#### 🥧 Sentiment Distribution")
+    with c_pie:
         if agg["total_articles"] > 0:
             pos_n = round(agg["pct_positive"] / 100 * agg["total_articles"])
             neg_n = round(agg["pct_negative"] / 100 * agg["total_articles"])
@@ -722,139 +889,154 @@ def render_sentiment_section(
             fig_pie = go.Figure(go.Pie(
                 labels=["Positive", "Negative", "Neutral"],
                 values=[max(pos_n, 0), max(neg_n, 0), max(neu_n, 0)],
-                marker_colors=["#10b981", "#ef4444", "#eab308"],
-                hole=0.55,
-                textfont_size=13,
+                marker_colors=["#10b981", "#ef4444", "#f59e0b"],
+                hole=0.65,
+                textfont_size=12,
+                showlegend=True,
             ))
             fig_pie.update_layout(
-                paper_bgcolor="#0a0e1a",
-                font_color="#e2e8f0",
-                height=280,
-                margin=dict(l=0, r=0, t=20, b=0),
-                legend=dict(bgcolor="#111827"),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#94a3b8", family="Sora, sans-serif"),
+                height=220,
+                margin=dict(l=0, r=0, t=10, b=0),
+                legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
             )
             st.plotly_chart(fig_pie, use_container_width=True)
-        else:
-            st.info("No data for chart.")
 
-    with col_bar:
-        st.markdown("#### 📊 Score Distribution")
+    with c_bar:
         if articles:
-            score_vals = [a["combined_score"] for a in articles]
-            score_clrs = [
-                "#10b981" if s >= 0.1 else ("#ef4444" if s <= -0.1 else "#eab308")
-                for s in score_vals
-            ]
-            titles_short = [
-                (a["title"][:38] + "…") if len(a["title"]) > 40 else a["title"]
-                for a in articles
-            ]
+            score_vals  = [a["combined_score"] for a in articles]
+            score_clrs  = ["#10b981" if s >= 0.1 else ("#ef4444" if s <= -0.1 else "#f59e0b") for s in score_vals]
+            titles_short = [(a["title"][:42] + "…") if len(a["title"]) > 44 else a["title"] for a in articles]
+
             fig_bar = go.Figure(go.Bar(
                 x=score_vals,
                 y=titles_short,
                 orientation="h",
                 marker_color=score_clrs,
-                text=[f"{s:+.3f}" for s in score_vals],
-                textposition="outside",
-                textfont_color="#e2e8f0",
             ))
-            fig_bar.add_vline(x=0, line_dash="dash", line_color="#475569", line_width=1)
+            fig_bar.add_vline(x=0, line_dash="dot", line_color="#334155", line_width=1)
             fig_bar.update_layout(
-                paper_bgcolor="#0a0e1a",
-                plot_bgcolor="#0a0e1a",
-                font_color="#e2e8f0",
-                height=max(280, len(articles) * 30),
-                margin=dict(l=0, r=60, t=20, b=0),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#64748b", family="Sora, sans-serif", size=10),
+                height=max(220, len(articles) * 26),
+                margin=dict(l=0, r=20, t=10, b=0),
                 showlegend=False,
-                xaxis=dict(gridcolor="#1e2d4a", range=[-1.1, 1.1]),
-                yaxis=dict(gridcolor="#1e2d4a", automargin=True),
+                xaxis=dict(gridcolor="#1e293b", range=[-1.1, 1.1], zeroline=False),
+                yaxis=dict(gridcolor="rgba(0,0,0,0)", automargin=True),
             )
             st.plotly_chart(fig_bar, use_container_width=True)
-        else:
-            st.info("No articles scored yet.")
 
-    st.markdown("<hr style='border-color:#1e2d4a; margin:20px 0'>", unsafe_allow_html=True)
+    # ═══════════════════════════════════════════════════════════════════
+    # BLOCK 5 — RECONCILIATION (simplified)
+    # ═══════════════════════════════════════════════════════════════════
+    st.markdown("<hr class='snt-divider'>", unsafe_allow_html=True)
+    st.markdown("<div class='snt-section-title'>🤝 Model vs Sentiment</div>", unsafe_allow_html=True)
 
-    # ── Model × Sentiment Reconciliation Panel ────────────────────────────────
-    st.markdown("#### 🤝 ML Prediction × Sentiment Reconciliation")
+    signal_colors = {"BUY": "#10b981", "SELL": "#ef4444", "HOLD": "#f59e0b"}
+    sig_clr = next((signal_colors[k] for k in signal_colors if k in model_signal), "#94a3b8")
 
-    align_icon = {
-        "Agreement":      "✅",
-        "Mild Conflict":  "⚠️",
-        "Strong Conflict":"🚨",
-        "Neutral":        "⚪",
-    }.get(reconciled["alignment"], "⚪")
+    align_icon_map = {
+        "Agreement":       "✅",
+        "Mild Conflict":   "⚠️",
+        "Strong Conflict": "🚨",
+        "Neutral":         "⚪",
+    }
+    align_icon = align_icon_map.get(reconciled["alignment"], "⚪")
 
-    align_bg = {
-        "Agreement":      "#064e3b",
-        "Mild Conflict":  "#3b3406",
-        "Strong Conflict":"#450a0a",
-        "Neutral":        "#1e2d4a",
-    }.get(reconciled["alignment"], "#1e2d4a")
+    r1, r2, r3, r4 = st.columns(4, gap="small")
 
-    align_border = {
-        "Agreement":      "#10b981",
-        "Mild Conflict":  "#eab308",
-        "Strong Conflict":"#ef4444",
-        "Neutral":        "#38bdf8",
-    }.get(reconciled["alignment"], "#38bdf8")
+    with r1:
+        st.markdown(f"""
+        <div class="snt-metric-card" style="border-color:#1e293b;">
+            <div class="snt-metric-label">Model Signal</div>
+            <div class="snt-metric-value" style="color:{sig_clr};">{model_signal}</div>
+            <div class="snt-metric-sub">ML prediction</div>
+        </div>""", unsafe_allow_html=True)
 
-    delta_sign = "+" if reconciled["delta_conf"] >= 0 else ""
+    with r2:
+        st.markdown(f"""
+        <div class="snt-metric-card" style="border-color:#1e293b;">
+            <div class="snt-metric-label">News Sentiment</div>
+            <div class="snt-metric-value" style="color:{sentiment_color};">{agg['overall_label']}</div>
+            <div class="snt-metric-sub">{agg['signal_strength'].lower()} signal</div>
+        </div>""", unsafe_allow_html=True)
 
-    st.markdown(
-        f"""
-        <div style="
-            background: {align_bg};
-            border: 2px solid {align_border};
-            border-radius: 16px;
-            padding: 28px;
-            margin-bottom: 16px;
-        ">
-            <div style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
-                <div style="font-size: 2.8rem;">{align_icon}</div>
-                <div style="flex: 1; min-width: 200px;">
-                    <div style="font-size: 1.2rem; font-weight: 800;
-                                color: {align_border}; margin-bottom: 6px;">
-                        {reconciled['alignment']}
-                    </div>
-                    <div style="color: #cbd5e1; font-size: 0.88rem; line-height: 1.6;">
-                        Model Signal: <b style="color:#e2e8f0">{reconciled['final_signal']}</b>
-                        &nbsp;|&nbsp;
-                        Sentiment: <b style="color:{align_border}">{reconciled['sentiment_label']}</b>
-                        (score: {reconciled['sentiment_score']:+.4f})
-                    </div>
+    with r3:
+        st.markdown(f"""
+        <div class="snt-metric-card" style="border-color:{alignment_color}40;">
+            <div class="snt-metric-label">Alignment</div>
+            <div class="snt-metric-value" style="font-size:1.3rem; color:{alignment_color};">
+                {align_icon} {reconciled['alignment']}
+            </div>
+            <div class="snt-metric-sub">model × news</div>
+        </div>""", unsafe_allow_html=True)
+
+    with r4:
+        delta_sign = "+" if reconciled["delta_conf"] >= 0 else ""
+        st.markdown(f"""
+        <div class="snt-metric-card" style="border-color:{alignment_color}40;">
+            <div class="snt-metric-label">Final Confidence</div>
+            <div class="snt-metric-value" style="color:{alignment_color};">{reconciled['adjusted_conf']:.1f}%</div>
+            <div class="snt-metric-sub">{delta_sign}{reconciled['delta_conf']:.0f}pp adjustment</div>
+        </div>""", unsafe_allow_html=True)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # BLOCK 6 — FINAL INSIGHT BOX
+    # ═══════════════════════════════════════════════════════════════════
+    st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
+
+    insight_map = {
+        ("Agreement",       "Positive"): ("Signals aligned — bullish conviction",   "Both the ML model and recent news point in the same direction. Positive sentiment reinforces the model's outlook."),
+        ("Agreement",       "Negative"): ("Signals aligned — bearish conviction",   "ML model and news sentiment are in agreement on the downside. Proceed with caution."),
+        ("Agreement",       "Neutral"):  ("Aligned but indecisive",                 "Both signals are neutral. The market may be waiting for a catalyst before moving."),
+        ("Mild Conflict",   "Positive"): ("Minor divergence — news leans positive",  "The model is cautious but news sentiment is positive. Watch for a potential narrative shift."),
+        ("Mild Conflict",   "Negative"): ("Minor divergence — news leans negative",  "The model's direction conflicts with negative news sentiment. Monitor closely."),
+        ("Strong Conflict", "Positive"): ("Sharp divergence — news strongly positive","The model and news are pulling in opposite directions. High uncertainty — consider waiting for clarity."),
+        ("Strong Conflict", "Negative"): ("Sharp divergence — news strongly negative","Strong conflict between model signal and bearish news. Risk is elevated."),
+        ("Neutral",         "Positive"): ("No clear conflict — slightly positive",   "News is positive but the model is neutral. Not enough signal to act decisively."),
+        ("Neutral",         "Negative"): ("No clear conflict — slightly negative",   "News leans negative but model is neutral. Monitor for deterioration."),
+        ("Neutral",         "Neutral"):  ("Low signal environment",                  "Both the model and sentiment are neutral. Await stronger signals before acting."),
+    }
+
+    insight_key     = (reconciled["alignment"], agg["overall_label"])
+    insight_title, insight_body = insight_map.get(insight_key, (
+        "Analysing market conditions",
+        f"Sentiment is {agg['overall_label'].lower()} with {agg['signal_strength'].lower()} strength. "
+        f"Adjusted model confidence stands at {reconciled['adjusted_conf']:.1f}%."
+    ))
+
+    st.markdown(f"""
+    <div class="snt-insight-box">
+        <div style="display:flex; align-items:flex-start; gap:16px;">
+            <div style="font-size:1.6rem; flex-shrink:0; margin-top:2px;">💡</div>
+            <div>
+                <div style="font-size:0.68rem; font-weight:700; letter-spacing:0.12em;
+                            text-transform:uppercase; color:#475569; margin-bottom:6px;">
+                    Final Insight
                 </div>
-                <div style="text-align: right; min-width: 140px;">
-                    <div style="font-size: 0.72rem; color: #64748b; text-transform: uppercase;
-                                letter-spacing: 0.08em;">Adjusted Confidence</div>
-                    <div style="font-size: 2rem; font-weight: 900; color: {align_border};">
-                        {reconciled['adjusted_conf']:.1f}%
-                    </div>
-                    <div style="font-size: 0.78rem; color: #94a3b8;">
-                        Original: {reconciled['original_conf']:.1f}%
-                        &nbsp;→&nbsp;
-                        <span style="color:{align_border}">
-                            {delta_sign}{reconciled['delta_conf']:.0f}pp
-                        </span>
-                    </div>
+                <div style="font-size:1.0rem; font-weight:700; color:#e2e8f0; margin-bottom:6px;">
+                    {insight_title}
+                </div>
+                <div style="font-size:0.85rem; color:#94a3b8; line-height:1.6;">
+                    {insight_body}
                 </div>
             </div>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    </div>
+    """, unsafe_allow_html=True)
 
-    # ── Refresh Info ──────────────────────────────────────────────────────────
-    st.markdown(
-        f"""
-        <div style="color: #475569; font-size: 0.72rem; text-align: right; margin-top: 8px;">
-            🔄 Pipeline: FinBERT (70%) + VADER (30%) · Cached 30min ·
-            Last run: {datetime.now().strftime('%H:%M:%S')} ·
-            Articles from last {HOURS_LOOKBACK}h
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    # ── Footer timestamp ──────────────────────────────────────────────────────
+    st.markdown(f"""
+    <div style="color:#334155; font-size:0.68rem; text-align:right; margin-top:16px;
+                font-family:'JetBrains Mono', monospace;">
+        FinBERT 70% + VADER 30% &nbsp;·&nbsp; Refreshes every 30 min &nbsp;·&nbsp;
+        {datetime.now().strftime('%H:%M:%S')}
+    </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 def main():
     st.title("📊 AI Stock Trading Dashboard")
