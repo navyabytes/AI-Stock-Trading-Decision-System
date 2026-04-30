@@ -7,8 +7,6 @@ try:
 except LookupError:
     nltk.download('vader_lexicon')
 
-run_dashboard()
-
 import re
 import time
 import hashlib
