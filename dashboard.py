@@ -58,7 +58,8 @@ except ImportError:
 try:
     from transformers import pipeline as hf_pipeline
     FINBERT_OK = True
-except ImportError:
+except Exception:
+    hf_pipeline = None
     FINBERT_OK = False
 
 
