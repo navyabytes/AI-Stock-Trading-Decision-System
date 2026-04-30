@@ -5,29 +5,7 @@ try:
 except LookupError:
     nltk.download('vader_lexicon')
 
-"""
-================================================================================
-SENTIMENT PIPELINE MODULE — AI Stock Trading Decision Support System
-File: sentiment_pipeline.py
-Place: Same directory as dashboard.py
-Import in dashboard.py: from sentiment_pipeline import *
-================================================================================
-
-ARCHITECTURE:
-    fetch_news()               → Raw RSS headlines
-    clean_news()               → Deduplicated, time-filtered
-    score_sentiment()          → FinBERT + VADER per headline
-    aggregate_sentiment()      → Overall signal + stats
-    adjust_prediction_with_sentiment()  → ML output + sentiment reconciliation
-
-USAGE IN dashboard.py:
-    from sentiment_pipeline import (
-        fetch_news, clean_news, score_sentiment,
-        aggregate_sentiment, adjust_prediction_with_sentiment,
-        render_sentiment_section          # Drop-in Streamlit section
-    )
-================================================================================
-"""
+st.title("📊 AI Stock Trading Dashboard")
 
 import re
 import time
