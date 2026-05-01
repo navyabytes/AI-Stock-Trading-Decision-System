@@ -10,22 +10,22 @@ ARCHITECTURE:
     predict_signal()          → BUY / SELL / HOLD + confidence + explainability
     get_ml_health()           → Structured health status for UI panel
     get_feature_importance()  → Top-N feature importances from RandomForest
+    get_market_snapshot()     → Live price / change for dashboard header
 
 FIXES IN THIS VERSION:
-    ✅ Feature alignment validation — no silent fill_value=0 on large mismatches
-    ✅ Correct class mapping: 0→SELL  1→HOLD  2→BUY with probability remapping
-    ✅ Separation-adjusted confidence — penalises ambiguous low-gap predictions
-    ✅ Feature importance from model.feature_importances_
-    ✅ Structured fallback_reason (never silent — UI can always display why)
-    ✅ get_ml_health() for dashboard status panel
-    ✅ data_timestamp in prediction result for UI freshness display
+    ✅ yfinance and ta added to requirements.txt (caller note)
+    ✅ feat_warn pre-initialised as "" — no more "variable referenced before
+       assignment" crash in the except block of predict_signal()
+    ✅ All dict values guaranteed non-None; all keys always present
     ✅ Robust data_timestamp extraction (handles all pandas index types)
     ✅ Probability normalisation to exactly 100% (floating-point safe)
     ✅ get_market_snapshot() hardened against None fast_info fields
     ✅ yfinance MultiIndex column flattening — single and multi-ticker safe
     ✅ predict_proba class deduplication — no double-counting across label maps
-    ✅ All dict values guaranteed non-None; all keys always present
-    ✅ Model loading via joblib (replaces pickle) — path: data/model.joblib
+    ✅ Model loading via joblib — path: data/model.joblib
+    ✅ Separation-adjusted confidence — penalises ambiguous low-gap predictions
+    ✅ Feature alignment validation — aborts on large mismatches
+    ✅ Correct class mapping: 0→SELL  1→HOLD  2→BUY
 ================================================================================
 """
 
@@ -74,8 +74,6 @@ FEATURE_COLS = [
 ]
 
 # Numeric class label → signal string (matches training encoding)
-# Note: only map each *distinct* class representation once to avoid
-# double-counting probabilities when both int and str keys appear.
 CLASS_LABEL_MAP: dict = {
     0: "SELL", 1: "HOLD", 2: "BUY",
     "0": "SELL", "1": "HOLD", "2": "BUY",
@@ -86,8 +84,8 @@ CLASS_LABEL_MAP: dict = {
 # Minimum feature overlap fraction before prediction is aborted
 MIN_FEATURE_OVERLAP = 0.80
 
-# If gap between top-2 class probabilities is below this, confidence is penalised
-SEPARATION_THRESHOLD = 0.10   # 10 pp
+# Gap between top-2 class probabilities below which confidence is penalised
+SEPARATION_THRESHOLD = 0.10
 
 # Maximum sentiment adjustment (pp) — ML remains primary signal
 MAX_SENTIMENT_ADJUSTMENT = 10.0
@@ -110,7 +108,6 @@ def load_model():
         On success : (model, [], "")
         On failure : (None,  [], "human-readable error")
 
-    feature_names is always [] — feature order is governed by FEATURE_COLS.
     Cached for the entire Streamlit session.
     """
     if not JOBLIB_OK:
@@ -121,12 +118,9 @@ def load_model():
 
     try:
         model = joblib.load(MODEL_PATH)
-
         if model is None:
             return None, [], "joblib file did not contain a model object"
-
         return model, [], ""
-
     except Exception as exc:
         return None, [], f"Model load error: {exc}"
 
@@ -141,12 +135,11 @@ def get_live_features():
     Download recent OHLCV data for RELIANCE.NS and compute technical features.
 
     Returns:
-        (DataFrame | None, error_str)
-        On success : single-row DataFrame with FEATURE_COLS columns, error=""
-        On failure : None, descriptive error string
+        (DataFrame, "")          on success — single-row DataFrame with FEATURE_COLS
+        (None, error_str)        on any failure
     """
     if not YFINANCE_OK:
-        return None, "yfinance not installed"
+        return None, "yfinance not installed — run: pip install yfinance"
 
     try:
         end   = datetime.now(timezone.utc)
@@ -166,22 +159,18 @@ def get_live_features():
 
         df = raw.copy()
 
-        # ── Flatten MultiIndex columns (yfinance ≥ 0.2 may return them) ───────
-        # MultiIndex: level 0 = field name (Close, Open…), level 1 = ticker
-        # We only have one ticker so take level 0 (the field name).
+        # Flatten MultiIndex columns (yfinance ≥ 0.2 may return them)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [str(col[0]).lower().strip() for col in df.columns]
         else:
             df.columns = [str(col).lower().strip() for col in df.columns]
 
-        # Drop duplicate columns that may appear after flattening
         df = df.loc[:, ~df.columns.duplicated()]
         df.dropna(inplace=True)
 
         if df.empty:
             return None, "DataFrame is empty after initial NaN drop"
 
-        # Verify required raw columns
         required_raw = {"close", "high", "low", "volume"}
         missing_raw  = required_raw - set(df.columns)
         if missing_raw:
@@ -192,18 +181,18 @@ def get_live_features():
         low    = df["low"]
         volume = df["volume"]
 
-        # ── Returns ──────────────────────────────────────────────────────────
+        # Returns
         df["ret_1d"]  = close.pct_change(1)
         df["ret_3d"]  = close.pct_change(3)
         df["ret_5d"]  = close.pct_change(5)
         df["ret_10d"] = close.pct_change(10)
 
-        # ── Moving-average ratios (price relative to SMA) ─────────────────────
+        # Moving-average ratios
         for w in [5, 10, 20, 50]:
             sma = close.rolling(w).mean()
             df[f"sma_{w}"] = (close / (sma + 1e-9)) - 1
 
-        # ── Technical indicators ──────────────────────────────────────────────
+        # Technical indicators
         if TA_OK:
             df["rsi_14"]    = ta.momentum.RSIIndicator(close, window=14).rsi()
             df["atr_14"]    = (
@@ -230,7 +219,7 @@ def get_live_features():
             macd_line       = ema12 - ema26
             df["macd_diff"] = macd_line - macd_line.ewm(span=9).mean()
 
-        # ── Volume ratio ──────────────────────────────────────────────────────
+        # Volume ratio
         df["vol_ratio"] = volume / (volume.rolling(20).mean() + 1e-9)
 
         df.dropna(inplace=True)
@@ -256,14 +245,11 @@ def _validate_and_align(features_df: pd.DataFrame, model_feature_names: list):
     Validate that live features align with what the model was trained on.
 
     Returns:
-        (aligned_df | None, warning_str)
-        Perfect match  : (reordered_df, "")
-        Minor mismatch : (zero-filled_df, warning describing what was zero-filled)
-        Major mismatch : (None, error describing why prediction was aborted)
-        No stored names: (features_df, "")  — cannot validate
+        (aligned_df, "")          — perfect match or no stored names
+        (reindexed_df, warning)   — minor mismatch, zero-filled, with warning
+        (None, error)             — major mismatch, prediction aborted
     """
     if not model_feature_names:
-        # No stored feature names → use as-is (cannot validate)
         return features_df, ""
 
     live_cols  = set(features_df.columns)
@@ -283,7 +269,6 @@ def _validate_and_align(features_df: pd.DataFrame, model_feature_names: list):
             f"Aborting to prevent misleading prediction."
         )
 
-    # Partial mismatch — safe to proceed but warn loudly
     aligned = features_df.reindex(columns=model_feature_names, fill_value=0.0)
     warn    = (
         f"Feature alignment partial ({overlap_frac:.0%}). "
@@ -299,20 +284,14 @@ def _validate_and_align(features_df: pd.DataFrame, model_feature_names: list):
 
 def _separation_adjusted_confidence(proba: np.ndarray) -> float:
     """
-    Confidence = max(proba) but penalised when top-2 are close together.
+    Confidence = max(proba) but penalised when top-2 classes are too close.
 
-    proba: raw sklearn probability array, values in [0, 1], summing to ~1.
-
-    If the gap between the top-2 class probabilities < SEPARATION_THRESHOLD,
+    If gap between top-2 probabilities < SEPARATION_THRESHOLD,
     confidence is linearly reduced toward 50% of its raw value.
-
-    Example: [0.38, 0.34, 0.28] → gap=0.04 < 0.10 → penalty applied.
-    Example: [0.72, 0.20, 0.08] → gap=0.52 → no penalty.
     """
     proba = np.asarray(proba, dtype=float)
     if proba.size == 0:
         return 50.0
-
     if proba.size == 1:
         return round(float(np.clip(proba[0], 0.0, 1.0)) * 100, 2)
 
@@ -322,7 +301,6 @@ def _separation_adjusted_confidence(proba: np.ndarray) -> float:
     base_conf  = top1 * 100
 
     if separation < SEPARATION_THRESHOLD:
-        # Scale: gap=0 → factor=0.5, gap=threshold → factor=1.0
         penalty_factor = 0.5 + 0.5 * (separation / SEPARATION_THRESHOLD)
         return round(float(np.clip(base_conf * penalty_factor, 0.0, 100.0)), 2)
 
@@ -335,7 +313,7 @@ def _separation_adjusted_confidence(proba: np.ndarray) -> float:
 
 def get_feature_importance(model, feature_names: list, top_n: int = 5) -> list:
     """
-    Extract top-N feature importances from a fitted RandomForest (or compatible) model.
+    Extract top-N feature importances from a fitted model.
 
     Returns:
         [{"name": str, "importance": float (%), "rank": int}]
@@ -348,7 +326,6 @@ def get_feature_importance(model, feature_names: list, top_n: int = 5) -> list:
         importances = np.asarray(model.feature_importances_, dtype=float)
         names       = list(feature_names) if feature_names else list(FEATURE_COLS)
 
-        # Guard: length mismatch — fall back to generic names
         if len(importances) != len(names):
             names = [f"feature_{i}" for i in range(len(importances))]
 
@@ -373,11 +350,9 @@ def get_feature_importance(model, feature_names: list, top_n: int = 5) -> list:
 def get_ml_health() -> dict:
     """
     Return a structured health snapshot for the UI status panel.
-
-    Checks model loading, live data availability, and feature pipeline health.
     Never raises — all values are always present and non-None.
     """
-    health = {
+    health: dict = {
         "model_loaded":        False,
         "live_data_ok":        False,
         "feature_pipeline_ok": False,
@@ -388,11 +363,11 @@ def get_ml_health() -> dict:
     }
 
     try:
-        model, _, load_err       = load_model()
-        health["model_loaded"]   = model is not None
-        health["model_error"]    = str(load_err) if load_err else ""
+        model, _, load_err     = load_model()
+        health["model_loaded"] = model is not None
+        health["model_error"]  = str(load_err) if load_err else ""
     except Exception as exc:
-        health["model_error"]    = str(exc)
+        health["model_error"]  = str(exc)
 
     try:
         features_df, feat_err              = get_live_features()
@@ -412,18 +387,15 @@ def get_ml_health() -> dict:
 def _safe_data_timestamp(features_df: pd.DataFrame) -> str:
     """
     Extract a human-readable timestamp from the last row of the features DataFrame.
-    Handles DatetimeIndex, timezone-aware index, and plain RangeIndex gracefully.
-    Always returns a non-empty string.
+    Handles DatetimeIndex, timezone-aware index, plain RangeIndex and strings.
+    Always returns a non-empty string — never raises.
     """
     try:
         last_idx = features_df.index[-1]
-        # pandas Timestamp (DatetimeIndex)
         if hasattr(last_idx, "strftime"):
             return last_idx.strftime("%d %b %Y %H:%M")
-        # datetime object
         if isinstance(last_idx, datetime):
             return last_idx.strftime("%d %b %Y %H:%M")
-        # String or other — return as-is
         val = str(last_idx)
         return val[:20] if len(val) > 20 else val
     except Exception:
@@ -434,23 +406,16 @@ def _safe_data_timestamp(features_df: pd.DataFrame) -> str:
 # PROBABILITY MAP BUILDER
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_prob_map(model, X: np.ndarray) -> tuple[dict, float]:
+def _build_prob_map(model, X: np.ndarray) -> tuple:
     """
-    Build a clean {BUY, HOLD, SELL} probability map (values in 0–100, sum ≈ 100)
+    Build a clean {BUY, HOLD, SELL} probability map (values in 0–100, sum == 100)
     and return separation-adjusted confidence.
 
-    Handles:
-    - Models with predict_proba (RandomForest, etc.)
-    - Models without predict_proba (deterministic fallback)
-    - Duplicate label mapping (e.g. class 0 and "0" both exist)
-    - Floating-point normalisation drift
-
     Returns:
-        prob_map  : dict {"BUY": float, "HOLD": float, "SELL": float}
-        confidence: float 0–100
+        prob_map   : dict {"BUY": float, "HOLD": float, "SELL": float}
+        confidence : float 0–100
     """
     if not hasattr(model, "predict_proba"):
-        # No probability support — use deterministic confidence
         raw_pred = model.predict(X)[0]
         signal   = CLASS_LABEL_MAP.get(raw_pred, str(raw_pred).upper())
         if signal not in ("BUY", "SELL", "HOLD"):
@@ -462,12 +427,8 @@ def _build_prob_map(model, X: np.ndarray) -> tuple[dict, float]:
     proba   = model.predict_proba(X)[0]
     classes = list(model.classes_)
 
-    # Map each class to its canonical label, accumulate probabilities.
-    # Use a seen-label set to avoid double-counting when both int `0` and
-    # string `"0"` are present in model.classes_ (shouldn't happen in practice,
-    # but guard defensively).
-    raw_map: dict[str, float] = {"BUY": 0.0, "HOLD": 0.0, "SELL": 0.0}
-    seen_labels: set = set()
+    raw_map:      dict = {"BUY": 0.0, "HOLD": 0.0, "SELL": 0.0}
+    seen_labels:  set  = set()
 
     for cls, p in zip(classes, proba):
         lbl = CLASS_LABEL_MAP.get(cls)
@@ -475,22 +436,19 @@ def _build_prob_map(model, X: np.ndarray) -> tuple[dict, float]:
             lbl = str(cls).upper()
         if lbl not in ("BUY", "HOLD", "SELL"):
             lbl = "HOLD"
-
-        # Deduplicate: if we've already seen this label from a different class
-        # key, skip to avoid double-counting.
+        # Skip duplicate label mappings (e.g. both int 0 and str "0")
         if lbl in seen_labels:
             continue
         seen_labels.add(lbl)
         raw_map[lbl] += float(p)
 
-    # Normalise so the three values sum to exactly 100.0
     total = sum(raw_map.values())
     if total > 0:
         prob_map = {k: round(v / total * 100, 2) for k, v in raw_map.items()}
     else:
         prob_map = {"BUY": 33.0, "HOLD": 34.0, "SELL": 33.0}
 
-    # Fix any rounding drift so sum == 100.0
+    # Fix floating-point rounding drift so values sum to exactly 100
     keys     = ["BUY", "HOLD", "SELL"]
     diff     = round(100.0 - sum(prob_map[k] for k in keys), 2)
     dominant = max(keys, key=lambda k: prob_map[k])
@@ -510,13 +468,13 @@ def predict_signal() -> dict:
 
     CONTRACT — returned dict always has ALL keys, never None values:
         signal          : str   "BUY" | "SELL" | "HOLD"
-        confidence      : float 0–100 (separation-adjusted)
+        confidence      : float 0–100
         probabilities   : dict  {"BUY": float, "HOLD": float, "SELL": float}
         source          : str   "model" | "fallback"
         fallback_reason : str   "" when source=="model", else human-readable cause
         feature_warning : str   "" or partial-alignment warning
         top_features    : list  [{name, importance, rank}] (empty on fallback)
-        data_timestamp  : str   timestamp of latest data bar (for UI freshness)
+        data_timestamp  : str   timestamp of latest data bar
         error           : str   "" or last error detail
     """
     def _fallback(reason: str, error: str = "", feature_warning: str = "") -> dict:
@@ -531,6 +489,9 @@ def predict_signal() -> dict:
             "data_timestamp":  "",
             "error":           str(error or reason),
         }
+
+    # Pre-initialise sentinel so it's always defined in except blocks
+    feat_warn = ""
 
     # 1 ── Load model ──────────────────────────────────────────────────────────
     try:
@@ -550,7 +511,6 @@ def predict_signal() -> dict:
     if features_df is None:
         return _fallback(f"Live data unavailable: {feat_err}", feat_err)
 
-    # Capture data timestamp before alignment
     data_timestamp = _safe_data_timestamp(features_df)
 
     # 3 ── Validate & align features ───────────────────────────────────────────
@@ -579,7 +539,6 @@ def predict_signal() -> dict:
 
         prob_map, confidence = _build_prob_map(model, X)
 
-        # 5 ── Feature importance ──────────────────────────────────────────────
         top_features = get_feature_importance(
             model,
             list(aligned_df.columns),
@@ -602,7 +561,7 @@ def predict_signal() -> dict:
         return _fallback(
             f"Prediction runtime error: {exc}",
             str(exc),
-            feature_warning=str(feat_warn) if "feat_warn" in dir() else "",
+            feature_warning=feat_warn,   # always defined — initialised above
         )
 
 
@@ -615,7 +574,7 @@ def get_market_snapshot() -> dict:
     """
     Fetch latest price, change %, and volume for RELIANCE.NS.
 
-    Returns a dict on success, empty dict on any failure — never raises.
+    Returns populated dict on success, empty dict on any failure — never raises.
     All numeric fields are guaranteed to be actual numbers (not None).
     """
     if not YFINANCE_OK:
@@ -625,7 +584,6 @@ def get_market_snapshot() -> dict:
         ticker = yf.Ticker(TICKER)
         info   = ticker.fast_info
 
-        # fast_info attributes can be None on some builds — guard each one
         def _safe_float(attr: str, default: float = 0.0) -> float:
             try:
                 val = getattr(info, attr, None)
