@@ -5,7 +5,7 @@ File: ml_model.py
 ================================================================================
 
 ARCHITECTURE:
-    load_model()              → Load trained RandomForest from pkl
+    load_model()              → Load trained RandomForest from joblib
     get_live_features()       → Build feature vector from current market data
     predict_signal()          → BUY / SELL / HOLD + confidence + explainability
     get_ml_health()           → Structured health status for UI panel
@@ -25,6 +25,7 @@ FIXES IN THIS VERSION:
     ✅ yfinance MultiIndex column flattening — single and multi-ticker safe
     ✅ predict_proba class deduplication — no double-counting across label maps
     ✅ All dict values guaranteed non-None; all keys always present
+    ✅ Model loading via joblib (replaces pickle) — path: data/model.joblib
 ================================================================================
 """
 
@@ -39,10 +40,10 @@ warnings.filterwarnings("ignore")
 
 # ── Optional imports ─────────────────────────────────────────────────────────
 try:
-    import pickle
-    PICKLE_OK = True
+    import joblib
+    JOBLIB_OK = True
 except ImportError:
-    PICKLE_OK = False
+    JOBLIB_OK = False
 
 try:
     import yfinance as yf
@@ -61,7 +62,7 @@ except ImportError:
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-MODEL_PATH   = Path("data/random_forest_model.pkl")
+MODEL_PATH   = Path("data/model.joblib")
 TICKER       = "RELIANCE.NS"
 LOOKBACK     = 60   # Trading days of history for feature computation
 
@@ -102,36 +103,29 @@ _FALLBACK_PROBS = {"BUY": 33.0, "HOLD": 34.0, "SELL": 33.0}
 @st.cache_resource(show_spinner=False)
 def load_model():
     """
-    Load trained Random Forest model from disk.
+    Load trained scikit-learn model from disk via joblib.
 
     Returns:
         (model, feature_names: list, error: str)
-        On success : (model, [...], "")
-        On failure : (None,  [],    "human-readable error")
+        On success : (model, [], "")
+        On failure : (None,  [], "human-readable error")
 
+    feature_names is always [] — feature order is governed by FEATURE_COLS.
     Cached for the entire Streamlit session.
     """
-    if not PICKLE_OK:
-        return None, [], "pickle module unavailable"
+    if not JOBLIB_OK:
+        return None, [], "joblib not installed — run: pip install joblib"
 
     if not MODEL_PATH.exists():
         return None, [], f"Model file not found at {MODEL_PATH}"
 
     try:
-        with open(MODEL_PATH, "rb") as fh:
-            payload = pickle.load(fh)
-
-        if isinstance(payload, dict):
-            model         = payload.get("model")
-            feature_names = payload.get("feature_names", [])
-        else:
-            model         = payload
-            feature_names = []
+        model = joblib.load(MODEL_PATH)
 
         if model is None:
-            return None, [], "Pickle file did not contain a model object"
+            return None, [], "joblib file did not contain a model object"
 
-        return model, list(feature_names), ""
+        return model, [], ""
 
     except Exception as exc:
         return None, [], f"Model load error: {exc}"
