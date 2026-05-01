@@ -27,7 +27,10 @@ CHANGES IN THIS VERSION:
 
 import csv
 import streamlit as st
-import plotly.graph_objects as go
+try:
+    import plotly.graph_objects as go
+except ModuleNotFoundError:
+    go = None
 from datetime import datetime
 from pathlib import Path
 
@@ -799,6 +802,11 @@ def render_headlines(articles: list, max_items: int = 6) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_charts(agg: dict) -> None:
+    # 🔒 Safety check (THIS is what fixes your crash)
+    if go is None:
+        st.info("Charts unavailable (Plotly not installed)")
+        return
+
     articles = agg.get("articles", [])
     if not articles:
         return
@@ -818,40 +826,59 @@ def render_charts(agg: dict) -> None:
             textfont_size=11,
             showlegend=True,
         ))
+
         fig.update_layout(
             **_plotly_defaults(),
             height=200,
-            legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10, color="#8b949e"),
-                        orientation="v"),
+            legend=dict(
+                bgcolor="rgba(0,0,0,0)",
+                font=dict(size=10, color="#8b949e"),
+                orientation="v"
+            ),
         )
+
         st.plotly_chart(fig, use_container_width=True)
 
     with c_bar:
-        vals   = [a["combined_score"] for a in articles]
+        vals = [a["combined_score"] for a in articles]
+
         colors = [
             "#3fb950" if s >= 0.1 else ("#f85149" if s <= -0.1 else "#d29922")
             for s in vals
         ]
+
         labels = [
             (a["title"][:48] + "…") if len(a["title"]) > 50 else a["title"]
             for a in articles
         ]
 
         fig2 = go.Figure(go.Bar(
-            x=vals, y=labels, orientation="h",
-            marker_color=colors, marker_line_width=0,
+            x=vals,
+            y=labels,
+            orientation="h",
+            marker_color=colors,
+            marker_line_width=0,
         ))
+
         fig2.add_vline(x=0, line_dash="dot", line_color="#30363d", line_width=1)
+
         fig2.update_layout(
             **_plotly_defaults(),
             height=max(180, len(articles) * 24),
-            xaxis=dict(gridcolor="#21262d", range=[-1.1, 1.1], zeroline=False,
-                       tickfont=dict(size=9)),
-            yaxis=dict(gridcolor="rgba(0,0,0,0)", automargin=True,
-                       tickfont=dict(size=9, color="#8b949e")),
+            xaxis=dict(
+                gridcolor="#21262d",
+                range=[-1.1, 1.1],
+                zeroline=False,
+                tickfont=dict(size=9)
+            ),
+            yaxis=dict(
+                gridcolor="rgba(0,0,0,0)",
+                automargin=True,
+                tickfont=dict(size=9, color="#8b949e")
+            ),
         )
-        st.plotly_chart(fig2, use_container_width=True)
 
+        st.plotly_chart(fig2, use_container_width=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION: PROBABILITY BREAKDOWN
