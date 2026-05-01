@@ -1,3 +1,11 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# requirements.txt — AI Stock Trading Dashboard
+# Streamlit Cloud deployment — lightweight, crash-proof
+# ──────────────────────────────────────────────────────────────────────────────
+# FinBERT is OPTIONAL. The app runs on VADER alone when transformers is absent.
+# Do NOT add torch / torchvision / transformers here for Streamlit Cloud.
+# ──────────────────────────────────────────────────────────────────────────────
+
 streamlit==1.57.0
 pandas==2.2.2
 numpy==1.26.4
@@ -6,3 +14,4 @@ joblib==1.3.2
 plotly==6.7.0
 feedparser==6.0.11
 nltk==3.8.1
+vaderSentiment==3.3.2
