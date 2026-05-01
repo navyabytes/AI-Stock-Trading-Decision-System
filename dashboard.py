@@ -982,6 +982,7 @@ def main() -> None:
     render_feature_warning(prediction)
 
     # ── Step 2: Sentiment loads progressively ─────────────────────────────────
+    agg = {} 
     with st.spinner("Fetching and scoring news…"):
         if "sentiment_loaded" not in st.session_state:
             st.session_state.sentiment_loaded = False
