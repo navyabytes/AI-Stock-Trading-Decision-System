@@ -2,57 +2,90 @@
 ================================================================================
 SENTIMENT PIPELINE MODULE — AI Stock Trading Decision Support System
 File: sentiment_pipeline.py
-Place: Same directory as dashboard.py
-Import in dashboard.py: from sentiment_pipeline import *
 ================================================================================
 
 ARCHITECTURE:
     fetch_news()               → Raw RSS headlines
     clean_news()               → Deduplicated, time-filtered
-    score_sentiment()          → FinBERT + VADER per headline
+    score_sentiment()          → FinBERT (optional) + VADER per headline
     aggregate_sentiment()      → Overall signal + stats
     adjust_prediction_with_sentiment()  → ML output + sentiment reconciliation
+    render_sentiment_section() → Drop-in Streamlit UI block
 
-USAGE IN dashboard.py:
-    from sentiment_pipeline import (
-        fetch_news, clean_news, score_sentiment,
-        aggregate_sentiment, adjust_prediction_with_sentiment,
-        render_sentiment_section          # Drop-in Streamlit section
-    )
+DEPENDENCY STRATEGY:
+    vaderSentiment : always used — lightweight, reliable
+    transformers   : OPTIONAL — loaded lazily via _safe_import_transformers(),
+                     NEVER imported at module level
+    torch          : OPTIONAL — pulled in by transformers only if available
+    torchvision    : NOT required — text-classification never needs it
+
+    The app NEVER crashes if transformers / torch / torchvision are absent.
+    Every import that could fail is wrapped in try/except with a None fallback.
 ================================================================================
 """
 
 import re
-import time
 import hashlib
 import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import numpy as np
-import pandas as pd
 import streamlit as st
 
 warnings.filterwarnings("ignore")
 
-# ─── Optional heavy imports (graceful fallback) ───────────────────────────────
-try:
-    import feedparser
-    FEEDPARSER_OK = True
-except ImportError:
-    FEEDPARSER_OK = False
 
+# ─────────────────────────────────────────────────────────────────────────────
+# SAFE LAZY IMPORT — called inside functions, never at module level
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _safe_import_transformers():
+    """
+    Attempt to import transformers.pipeline and torch at call-time.
+
+    By deferring this import we guarantee that missing transformers / torch /
+    torchvision packages do NOT raise at module-load time.
+
+    Env vars are set before import so HuggingFace never phones home or
+    attempts a network download that could hang on Streamlit Cloud cold starts.
+
+    Returns:
+        (hf_pipeline_fn, torch_module)   on success
+        (None, None)                     on any ImportError / Exception
+    """
+    try:
+        import os
+        os.environ.setdefault("TRANSFORMERS_OFFLINE",      "1")
+        os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+        os.environ.setdefault("TOKENIZERS_PARALLELISM",    "false")  # avoids fork warning
+
+        from transformers import pipeline as hf_pipeline  # noqa: PLC0415
+        import torch                                       # noqa: PLC0415
+        return hf_pipeline, torch
+
+    except ImportError:
+        # transformers or torch simply not installed — expected on Cloud free tier
+        return None, None
+
+    except Exception:
+        # Catch-all: covers torchvision errors, CUDA init failures, etc.
+        return None, None
+
+
+# ─── VADER — lightweight, attempted once at module load ──────────────────────
 try:
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
     VADER_OK = True
-except ImportError:
+except Exception:
     VADER_OK = False
 
+# ─── feedparser — needed for RSS ─────────────────────────────────────────────
 try:
-    from transformers import pipeline as hf_pipeline
-    FINBERT_OK = True
-except ImportError:
-    FINBERT_OK = False
+    import feedparser
+    FEEDPARSER_OK = True
+except Exception:
+    FEEDPARSER_OK = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -65,62 +98,60 @@ RSS_FEEDS = [
     "https://feeds.finance.yahoo.com/rss/2.0/headline?s=RELIANCE.NS&region=US&lang=en-US",
 ]
 
-FINBERT_MODEL   = "ProsusAI/finbert"
-FINBERT_WEIGHT  = 0.70
-VADER_WEIGHT    = 0.30
-MAX_ARTICLES    = 20
-HOURS_LOOKBACK  = 24
+FINBERT_MODEL    = "ProsusAI/finbert"
+FINBERT_WEIGHT   = 0.70
+VADER_WEIGHT     = 0.30
+MAX_ARTICLES     = 20
+HOURS_LOOKBACK   = 24
+
+# Thresholds for sentiment labelling
+_POS_THRESH      =  0.05
+_NEG_THRESH      = -0.05
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 1 — NEWS PIPELINE
+# STEP 1 — NEWS FETCH
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_news(max_articles: int = MAX_ARTICLES) -> list[dict]:
+def fetch_news(max_articles: int = MAX_ARTICLES) -> list:
     """
-    Fetch raw news from Google News RSS.
+    Fetch raw headlines from RSS feeds.
 
-    Returns list of dicts:
-        { title, published_raw, source, url }
-
-    Handles:
-        - feedparser not installed  → returns []
-        - Network timeout           → returns []
-        - Empty feed                → returns []
+    Returns list of dicts: { title, published_raw, source, url }
+    Returns [] on any failure — never raises.
     """
     if not FEEDPARSER_OK:
-        st.warning("⚠️ feedparser not installed. Run: pip install feedparser")
+        st.warning("⚠️ feedparser not installed — run: pip install feedparser")
         return []
 
     articles = []
     for feed_url in RSS_FEEDS:
         try:
             feed = feedparser.parse(feed_url)
-            if not feed.entries:
-                continue
-            for entry in feed.entries:
-                title = entry.get("title", "").strip()
+            for entry in getattr(feed, "entries", []):
+                title = (entry.get("title") or "").strip()
                 if not title:
                     continue
-                published = entry.get("published", entry.get("updated", ""))
-                source    = entry.get("source", {}).get("title", "Unknown")
-                url       = entry.get("link", "")
                 articles.append({
                     "title":         title,
-                    "published_raw": published,
-                    "source":        source,
-                    "url":           url,
+                    "published_raw": entry.get("published", entry.get("updated", "")),
+                    "source":        (entry.get("source") or {}).get("title", "Unknown"),
+                    "url":           entry.get("link", ""),
                 })
         except Exception:
-            continue  # Don't crash on one bad feed
+            continue   # one bad feed must not crash the rest
 
     return articles
 
 
 def _parse_published(raw: str) -> Optional[datetime]:
-    """Parse RSS date strings into UTC-aware datetime. Returns None on failure."""
+    """
+    Parse an RSS date string into a UTC-aware datetime.
+    Returns None on any failure — never raises.
+    """
     if not raw:
         return None
+
     fmts = [
         "%a, %d %b %Y %H:%M:%S %z",
         "%a, %d %b %Y %H:%M:%S %Z",
@@ -130,44 +161,33 @@ def _parse_published(raw: str) -> Optional[datetime]:
     for fmt in fmts:
         try:
             dt = datetime.strptime(raw, fmt)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except ValueError:
             continue
-    # Fallback: try email.utils
+
     try:
-        from email.utils import parsedate_to_datetime
+        from email.utils import parsedate_to_datetime  # stdlib — always safe
         dt = parsedate_to_datetime(raw)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     except Exception:
         return None
 
 
-def _headline_fingerprint(title: str) -> str:
-    """Short hash for deduplication — ignores punctuation/case differences."""
-    normalized = re.sub(r"[^a-z0-9 ]", "", title.lower()).strip()
-    return hashlib.md5(normalized.encode()).hexdigest()
+def _fingerprint(title: str) -> str:
+    """MD5 of normalised title — used for deduplication."""
+    normalised = re.sub(r"[^a-z0-9 ]", "", title.lower()).strip()
+    return hashlib.md5(normalised.encode()).hexdigest()
 
 
 def clean_news(
-    raw_articles: list[dict],
+    raw_articles:   list,
     hours_lookback: int = HOURS_LOOKBACK,
     max_articles:   int = MAX_ARTICLES,
-) -> list[dict]:
+) -> list:
     """
-    Deduplicate and time-filter raw news.
-
-    - Removes headlines with identical fingerprints
-    - Keeps only articles published within `hours_lookback` hours
-    - Attaches parsed `published_dt` (UTC-aware datetime)
-    - Returns up to `max_articles` sorted newest-first
-
-    Falls back gracefully:
-        - If ALL articles have unparseable dates, keeps newest `max_articles`
-          without time filtering (marks published_dt = None).
+    Deduplicate and time-filter raw articles.
+    Falls back to all articles if none pass the time gate.
+    Returns up to max_articles sorted newest-first.
     """
     if not raw_articles:
         return []
@@ -175,64 +195,73 @@ def clean_news(
     now_utc = datetime.now(timezone.utc)
     cutoff  = now_utc - timedelta(hours=hours_lookback)
 
-    seen_fingerprints = set()
+    seen    = set()
     cleaned = []
-
     for art in raw_articles:
-        fp = _headline_fingerprint(art["title"])
-        if fp in seen_fingerprints:
+        fp = _fingerprint(art["title"])
+        if fp in seen:
             continue
-        seen_fingerprints.add(fp)
-
-        dt = _parse_published(art["published_raw"])
-        art["published_dt"] = dt
+        seen.add(fp)
+        art["published_dt"] = _parse_published(art["published_raw"])
         cleaned.append(art)
 
-    # Time filter — only keep recent articles
-    time_filtered = [a for a in cleaned if a["published_dt"] is not None
-                     and a["published_dt"] >= cutoff]
+    recent = [
+        a for a in cleaned
+        if a["published_dt"] is not None and a["published_dt"] >= cutoff
+    ]
 
-    # Fallback: if nothing passes time filter, use all (no time gate)
-    if not time_filtered and cleaned:
-        time_filtered = cleaned   # Show something rather than nothing
-
-    # Sort newest first
-    time_filtered.sort(
+    # Graceful fallback: show something even if dates are stale / missing
+    pool = recent if recent else cleaned
+    pool.sort(
         key=lambda a: a["published_dt"] or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
     )
-
-    return time_filtered[:max_articles]
+    return pool[:max_articles]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 2 — SENTIMENT SCORING
+# STEP 2 — MODEL LOADERS  (session-cached)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @st.cache_resource(show_spinner=False)
 def _load_finbert():
-    """Load FinBERT once and cache for session lifetime. Uses GPU if available."""
-    if not FINBERT_OK:
-        return None
+    """
+    Load FinBERT text-classification pipeline (CPU-only).
+
+    Uses _safe_import_transformers() so this function is safe to call even
+    when transformers, torch, or torchvision are not installed.
+
+    Returns:
+        HuggingFace pipeline object   on success
+        None                          on any failure (silent — VADER takes over)
+    """
+    hf_pipeline, _torch = _safe_import_transformers()
+    if hf_pipeline is None:
+        return None   # transformers not installed — silent fallback to VADER
+
     try:
-        import torch
-        device = 0 if torch.cuda.is_available() else -1
         clf = hf_pipeline(
             "text-classification",
             model=FINBERT_MODEL,
-            top_k=None,         # Return all 3 class scores
+            top_k=None,        # return all 3 class scores per input
             truncation=True,
             max_length=512,
-            device=device,
+            device=-1,         # CPU only — zero GPU dependency
         )
         return clf
     except Exception:
-        return None
+        return None            # model download failed, OOM, etc.
 
 
 @st.cache_resource(show_spinner=False)
 def _load_vader():
-    """Load VADER once and cache for session lifetime."""
+    """
+    Load VADER SentimentIntensityAnalyzer.
+
+    Returns:
+        SentimentIntensityAnalyzer   on success
+        None                         if vaderSentiment is not installed
+    """
     if not VADER_OK:
         return None
     try:
@@ -241,181 +270,239 @@ def _load_vader():
         return None
 
 
-def _finbert_batch_score(clf, titles: list[str]) -> list[float]:
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 3 — INFERENCE HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _finbert_batch_score(clf, texts: list) -> list:
     """
-    Run FinBERT on a list of titles in ONE batched call.
-    Maps {positive→+1, neutral→0, negative→-1} weighted by probability.
-    Returns list of floats in [-1, +1]. Falls back to zeros on any error.
+    Run FinBERT inference on a batch of texts.
+
+    Maps FinBERT labels to scalars:
+        positive → +score
+        negative → -score
+        neutral  →  0.0
+
+    Returns:
+        list[float | None]
+            float — valid score in [-1, +1]
+            None  — inference failed for this item (treated as "no FinBERT")
+
+    Never raises. Handles every malformed output shape safely.
     """
-    if clf is None or not titles:
-        return [0.0] * len(titles)
+    if clf is None or not texts:
+        return [None] * len(texts)
+
     try:
-        score_map = {"positive": 1.0, "neutral": 0.0, "negative": -1.0}
-        batch_results = clf(titles)
-        scores = []
-        for result in batch_results:
-            # result may be a list of dicts (top_k=None) or a single dict
-            if isinstance(result, dict):
-                result = [result]
-            total = sum(
-                r["score"] * score_map.get(r["label"].lower(), 0.0)
-                for r in result
-            )
-            scores.append(float(np.clip(total, -1.0, 1.0)))
-        return scores
+        raw_results = clf(texts)
     except Exception:
-        return [0.0] * len(titles)
+        return [None] * len(texts)
+
+    # clf(texts) must return a list — one element per input.
+    # If it returned anything else (dict, None, etc.) bail out entirely.
+    if not isinstance(raw_results, list):
+        return [None] * len(texts)
+
+    scores = []
+    for result in raw_results:
+        try:
+            # top_k=None → result is a list of {label, score} dicts for ONE input
+            if isinstance(result, list):
+                total = 0.0
+                for item in result:
+                    if not isinstance(item, dict):
+                        continue
+                    lbl = (item.get("label") or "").lower()
+                    s   = float(item.get("score", 0.0))
+                    if "positive" in lbl:
+                        total += s
+                    elif "negative" in lbl:
+                        total -= s
+                    # neutral contributes 0
+                scores.append(float(np.clip(total, -1.0, 1.0)))
+
+            elif isinstance(result, dict):
+                lbl = (result.get("label") or "").lower()
+                s   = float(result.get("score", 0.0))
+                if "positive" in lbl:
+                    scores.append(min(s, 1.0))
+                elif "negative" in lbl:
+                    scores.append(max(-s, -1.0))
+                else:
+                    scores.append(0.0)
+
+            else:
+                # Unexpected type — safe neutral fallback, not None, so blend still runs
+                scores.append(None)
+
+        except Exception:
+            scores.append(None)
+
+    # Safety pad: clf should never return fewer results than inputs, but guard anyway
+    while len(scores) < len(texts):
+        scores.append(None)
+
+    return scores
 
 
-def _vader_score(analyzer, title: str) -> float:
+def _vader_score_single(analyzer, text: str) -> float:
     """
-    Run VADER on a single headline.
-    Returns compound score in [-1, +1], or 0.0 on failure.
+    Return VADER compound score in [-1, +1].
+    Returns 0.0 on any failure — never raises.
     """
     if analyzer is None:
         return 0.0
     try:
-        return float(analyzer.polarity_scores(title)["compound"])
+        return float(analyzer.polarity_scores(text)["compound"])
     except Exception:
         return 0.0
 
 
-def score_sentiment(articles: list[dict]) -> list[dict]:
-    """
-    Score each article with FinBERT (batched) + VADER.
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 4 — SENTIMENT SCORING
+# ─────────────────────────────────────────────────────────────────────────────
 
-    Adds to each article dict:
-        finbert_score  : float [-1, +1]
-        vader_score    : float [-1, +1]
-        combined_score : float [-1, +1]  (weighted blend)
-        sentiment_label: str   (Positive / Negative / Neutral)
+def score_sentiment(articles: list):
+    """
+    Score each article dict with VADER (always) and FinBERT (when available).
 
     Blending:
-        combined = 0.70 * finbert + 0.30 * vader
+        FinBERT available  →  combined = 0.70 * finbert + 0.30 * vader
+        FinBERT missing    →  combined = vader only
 
-    If both models unavailable, combined_score = 0.0 (neutral fallback).
+    Adds to each article dict:
+        vader_score    : float          always in [-1, +1]
+        finbert_score  : float | None   [-1, +1] or None when unavailable
+        combined_score : float          always in [-1, +1]
+        sentiment_label: str            "Positive" | "Negative" | "Neutral"
+
+    Returns:
+        (scored_articles: list, clf: pipeline | None)
+        clf is returned so the caller can pass it to aggregate_sentiment()
+        without triggering a second _load_finbert() cache lookup.
+
+    Never raises — every failure path produces a neutral (0.0) score.
     """
+    vader   = _load_vader()
+    finbert = _load_finbert()   # cached — loaded exactly once per session
+
     if not articles:
-        return []
+        return [], finbert
 
-    clf      = _load_finbert()
-    analyzer = _load_vader()
-
-    # Extract all titles and run FinBERT in one batch call
     titles         = [art["title"] for art in articles]
-    finbert_scores = _finbert_batch_score(clf, titles)
+    finbert_scores = _finbert_batch_score(finbert, titles)
 
     scored = []
     for art, fb in zip(articles, finbert_scores):
-        vd = _vader_score(analyzer, art["title"])
 
-        # Weighted blend
-        if clf is not None and analyzer is not None:
-            combined = FINBERT_WEIGHT * fb + VADER_WEIGHT * vd
-        elif clf is not None:
-            combined = fb
-        elif analyzer is not None:
-            combined = vd
+        # ── VADER ─────────────────────────────────────────────────────────────
+        vs = _vader_score_single(vader, art["title"])
+
+        # ── Hybrid blend ──────────────────────────────────────────────────────
+        if fb is not None:
+            combined = float(np.clip(FINBERT_WEIGHT * fb + VADER_WEIGHT * vs, -1.0, 1.0))
         else:
-            combined = 0.0
+            combined = float(np.clip(vs, -1.0, 1.0))
 
-        combined = float(np.clip(combined, -1.0, 1.0))
-
-        # Label thresholds
-        if combined >= 0.15:
+        # ── Label ─────────────────────────────────────────────────────────────
+        if combined > _POS_THRESH:
             label = "Positive"
-        elif combined <= -0.15:
+        elif combined < _NEG_THRESH:
             label = "Negative"
         else:
             label = "Neutral"
 
         scored.append({
             **art,
-            "finbert_score":   round(fb,       4),
-            "vader_score":     round(vd,       4),
-            "combined_score":  round(combined, 4),
+            "vader_score":     round(vs,              4),
+            "finbert_score":   round(float(fb), 4) if fb is not None else None,
+            "combined_score":  round(combined,        4),
             "sentiment_label": label,
         })
 
-    return scored
+    return scored, finbert
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 3 — AGGREGATION
+# STEP 5 — AGGREGATION
 # ─────────────────────────────────────────────────────────────────────────────
 
-def aggregate_sentiment(scored_articles: list[dict]) -> dict:
+def _active_model_label(clf) -> str:
     """
-    Compute overall sentiment signal from scored articles.
+    Return a human-readable NLP backend label.
 
-    Weighting:
-        Recency-weighted mean — articles from last 6h get weight 2x,
-        last 12h get 1.5x, older get 1x.
+    Accepts the already-loaded clf object so _load_finbert() is NEVER called
+    a second time — eliminates the redundant cache-lookup / double-load issue.
 
-    Returns:
-        {
-          total_articles   : int
-          avg_score        : float
-          weighted_score   : float
-          pct_positive     : float
-          pct_negative     : float
-          pct_neutral      : float
-          overall_label    : str   (Positive / Negative / Neutral)
-          signal_strength  : str   (Strong / Moderate / Weak)
-          articles         : list  (same as input — for convenience)
-        }
+    Args:
+        clf: the result of _load_finbert() (pipeline object or None)
     """
+    if clf is not None:
+        return "FinBERT + VADER"
+    if VADER_OK:
+        return "VADER only (FinBERT unavailable)"
+    return "No NLP model loaded"
+
+
+def aggregate_sentiment(scored_articles: list, clf=None) -> dict:
+    """
+    Compute overall sentiment from scored articles using recency weighting.
+
+    Args:
+        scored_articles: output of score_sentiment()
+        clf:             the finbert pipeline object (or None) — passed in so
+                         _active_model_label() never calls _load_finbert() again.
+
+    Weights:
+        Age ≤ 6 h  → 2.0
+        Age ≤ 12 h → 1.5
+        Older      → 1.0
+
+    Returns a dict with every key always present — never raises.
+    """
+    model_used = _active_model_label(clf)
+
+    base = {
+        "total_articles":  0,
+        "avg_score":       0.0,
+        "weighted_score":  0.0,
+        "pct_positive":    0.0,
+        "pct_negative":    0.0,
+        "pct_neutral":     100.0,
+        "overall_label":   "Neutral",
+        "signal_strength": "Weak",
+        "articles":        [],
+        "model_used":      model_used,
+    }
+
     if not scored_articles:
-        return {
-            "total_articles": 0,
-            "avg_score":       0.0,
-            "weighted_score":  0.0,
-            "pct_positive":    0.0,
-            "pct_negative":    0.0,
-            "pct_neutral":     100.0,
-            "overall_label":   "Neutral",
-            "signal_strength": "Weak",
-            "articles":        [],
-        }
+        return base
 
     now_utc = datetime.now(timezone.utc)
-    scores  = []
-    weights = []
-
+    scores, weights = [], []
     pos = neg = neu = 0
 
     for art in scored_articles:
-        s = art["combined_score"]
+        s = art.get("combined_score", 0.0)
         scores.append(s)
 
-        # Recency weight
         dt = art.get("published_dt")
         if dt is not None:
-            age_hours = (now_utc - dt).total_seconds() / 3600
-            if age_hours <= 6:
-                w = 2.0
-            elif age_hours <= 12:
-                w = 1.5
-            else:
-                w = 1.0
+            age_h = (now_utc - dt).total_seconds() / 3600
+            w = 2.0 if age_h <= 6 else (1.5 if age_h <= 12 else 1.0)
         else:
             w = 1.0
         weights.append(w)
 
-        lbl = art["sentiment_label"]
-        if lbl == "Positive":    pos += 1
-        elif lbl == "Negative":  neg += 1
-        else:                    neu += 1
+        lbl = art.get("sentiment_label", "Neutral")
+        if lbl == "Positive":   pos += 1
+        elif lbl == "Negative": neg += 1
+        else:                   neu += 1
 
-    n = len(scores)
+    n              = len(scores)
     avg_score      = float(np.mean(scores))
     weighted_score = float(np.average(scores, weights=weights))
 
-    pct_pos = round(pos / n * 100, 1)
-    pct_neg = round(neg / n * 100, 1)
-    pct_neu = round(neu / n * 100, 1)
-
-    # Overall label from weighted score
     if weighted_score >= 0.10:
         overall_label = "Positive"
     elif weighted_score <= -0.10:
@@ -423,30 +510,29 @@ def aggregate_sentiment(scored_articles: list[dict]) -> dict:
     else:
         overall_label = "Neutral"
 
-    # Signal strength
-    abs_score = abs(weighted_score)
-    if abs_score >= 0.40:
-        signal_strength = "Strong"
-    elif abs_score >= 0.20:
-        signal_strength = "Moderate"
-    else:
-        signal_strength = "Weak"
+    abs_ws = abs(weighted_score)
+    signal_strength = (
+        "Strong"   if abs_ws >= 0.40 else
+        "Moderate" if abs_ws >= 0.20 else
+        "Weak"
+    )
 
     return {
         "total_articles":  n,
         "avg_score":       round(avg_score,      4),
         "weighted_score":  round(weighted_score, 4),
-        "pct_positive":    pct_pos,
-        "pct_negative":    pct_neg,
-        "pct_neutral":     pct_neu,
+        "pct_positive":    round(pos / n * 100,  1),
+        "pct_negative":    round(neg / n * 100,  1),
+        "pct_neutral":     round(neu / n * 100,  1),
         "overall_label":   overall_label,
         "signal_strength": signal_strength,
         "articles":        scored_articles,
+        "model_used":      model_used,
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 5 — PREDICTION ADJUSTMENT
+# STEP 6 — PREDICTION ADJUSTMENT
 # ─────────────────────────────────────────────────────────────────────────────
 
 def adjust_prediction_with_sentiment(
@@ -455,59 +541,41 @@ def adjust_prediction_with_sentiment(
     agg:              dict,
 ) -> dict:
     """
-    Reconcile ML model prediction with aggregated sentiment.
+    Reconcile ML model prediction with aggregated news sentiment.
 
     Rules:
-        Agreement   → confidence +5pp (capped at 98)
-        Mild conflict   → confidence -8pp
-        Strong conflict → confidence -15pp + warning flag
+        Agreement       → + 5 pp (cap 98)
+        Mild Conflict   → − 8 pp
+        Strong Conflict → −15 pp + warning string
 
-    Returns:
-        {
-          final_signal      : str    (same as model_signal)
-          adjusted_conf     : float
-          delta_conf        : float  (change applied)
-          alignment         : str    (Agreement / Mild Conflict / Strong Conflict / Neutral)
-          warning           : str    (empty string or warning message)
-          sentiment_label   : str
-          sentiment_score   : float
-        }
+    Returns a dict with every key always present — never raises.
     """
-    sent_label  = agg.get("overall_label",   "Neutral")
-    sent_score  = agg.get("weighted_score",  0.0)
-    sent_strength = agg.get("signal_strength", "Weak")
+    sent_label    = agg.get("overall_label",    "Neutral")
+    sent_score    = agg.get("weighted_score",   0.0)
+    sent_strength = agg.get("signal_strength",  "Weak")
 
-    # Directional mapping
     model_dir = (
-        1  if "BUY"  in model_signal else
+         1 if "BUY"  in model_signal else
         -1 if "SELL" in model_signal else
-        0
+         0
     )
     sent_dir = (
-        1  if sent_label == "Positive" else
+         1 if sent_label == "Positive" else
         -1 if sent_label == "Negative" else
-        0
+         0
     )
 
-    # Determine alignment
     if model_dir == 0 or sent_dir == 0:
-        alignment = "Neutral"
-        delta     = 0.0
-        warning   = ""
-
+        alignment, delta, warning = "Neutral", 0.0, ""
     elif model_dir == sent_dir:
-        alignment = "Agreement"
-        delta     = +5.0
-        warning   = ""
-
+        alignment, delta, warning = "Agreement", +5.0, ""
     else:
-        # Conflict — magnitude depends on sentiment strength
         if sent_strength == "Strong":
             alignment = "Strong Conflict"
             delta     = -15.0
             warning   = (
                 f"⚠️ Strong Sentiment Conflict: Model signals {model_signal} "
-                f"but sentiment is strongly {sent_label.lower()} "
+                f"but news is strongly {sent_label.lower()} "
                 f"(score: {sent_score:+.3f}). Exercise caution."
             )
         else:
@@ -515,355 +583,305 @@ def adjust_prediction_with_sentiment(
             delta     = -8.0
             warning   = (
                 f"⚠️ Mild Sentiment Conflict: Model signals {model_signal} "
-                f"while news sentiment leans {sent_label.lower()}."
+                f"while news leans {sent_label.lower()}."
             )
 
     adjusted_conf = float(np.clip(model_confidence + delta, 0.0, 98.0))
 
     return {
-        "final_signal":   model_signal,
-        "adjusted_conf":  round(adjusted_conf, 2),
-        "original_conf":  round(model_confidence, 2),
-        "delta_conf":     round(delta, 2),
-        "alignment":      alignment,
-        "warning":        warning,
-        "sentiment_label":sent_label,
-        "sentiment_score":sent_score,
+        "final_signal":    model_signal,
+        "adjusted_conf":   round(adjusted_conf,    2),
+        "original_conf":   round(model_confidence, 2),
+        "delta_conf":      round(delta,            2),
+        "alignment":       alignment,
+        "warning":         warning,
+        "sentiment_label": sent_label,
+        "sentiment_score": sent_score,
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CACHED FULL PIPELINE RUNNER
+# CACHED PIPELINE RUNNER
 # ─────────────────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=1800, show_spinner=False)  # Refresh every 30 min
+@st.cache_data(ttl=1800, show_spinner=False)   # refresh every 30 min
 def run_sentiment_pipeline() -> dict:
     """
-    Run the full pipeline: fetch → clean → score → aggregate.
-    Returns the aggregation dict (which contains .articles list).
-    Cached for 30 minutes to avoid hammering RSS + model inference.
+    Execute the full sentiment pipeline end-to-end.
+
+    fetch → clean → score → aggregate
+
+    _load_finbert() is called exactly ONCE inside score_sentiment().
+    The resulting clf object is threaded through to aggregate_sentiment()
+    so _active_model_label() never triggers a second model load.
+
+    Cached for 30 minutes to avoid hammering RSS endpoints and re-running
+    FinBERT inference on every page reload.
+    Safe to call even when transformers / torch are not installed.
     """
-    raw      = fetch_news()
-    cleaned  = clean_news(raw)
-    scored   = score_sentiment(cleaned)
-    agg      = aggregate_sentiment(scored)
-    return agg
+    raw            = fetch_news()
+    cleaned        = clean_news(raw)
+    scored, clf    = score_sentiment(cleaned)   # clf loaded exactly once
+    return aggregate_sentiment(scored, clf=clf)  # passed in — no reload
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 4 — STREAMLIT RENDER FUNCTION
+# STREAMLIT RENDER FUNCTION  (drop-in for dashboard.py)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_sentiment_section(
     model_signal:     str   = "HOLD",
     model_confidence: float = 50.0,
-):
+) -> None:
     """
-    Drop-in replacement for the Sentiment Analysis section in dashboard.py.
+    Drop-in Streamlit section for the Sentiment Analysis page.
 
-    Usage in dashboard.py (inside the `elif nav == "🗞️ Sentiment Analysis":` block):
+    Handles safely:
+        - finbert_score == None      (FinBERT not available)
+        - total_articles == 0        (no RSS data)
+        - Plotly not installed        (charts section skipped)
 
+    Usage in dashboard.py:
         from sentiment_pipeline import render_sentiment_section
         render_sentiment_section(live_signal, live_conf)
     """
-    import plotly.graph_objects as go
+    # ── Plotly is optional ────────────────────────────────────────────────────
+    try:
+        import plotly.graph_objects as go
+        _PLOTLY = True
+    except ImportError:
+        go      = None
+        _PLOTLY = False
 
-    # ── Run pipeline ─────────────────────────────────────────────────────────
-    with st.spinner("🔄 Fetching live news & running NLP models…"):
+    # ── Run pipeline ──────────────────────────────────────────────────────────
+    with st.spinner("🔄 Fetching live news & scoring sentiment…"):
         agg = run_sentiment_pipeline()
 
-    articles = agg.get("articles", [])
-    no_data  = agg["total_articles"] == 0
+    articles   = agg.get("articles", [])
+    no_data    = agg["total_articles"] == 0
+    model_used = agg.get("model_used", "VADER only (FinBERT unavailable)")
 
-    # ── Reconcile with ML prediction ─────────────────────────────────────────
     reconciled = adjust_prediction_with_sentiment(model_signal, model_confidence, agg)
 
-    # ── Summary Metrics Row ───────────────────────────────────────────────────
-    mc1, mc2, mc3, mc4 = st.columns(4)
+    # ── NLP model badge ───────────────────────────────────────────────────────
+    badge_color = "#388bfd" if "FinBERT" in model_used else "#d29922"
+    st.markdown(
+        f'<div style="font-size:0.75rem;color:{badge_color};'
+        f'background:{badge_color}18;border:1px solid {badge_color}44;'
+        f'border-radius:8px;padding:5px 14px;display:inline-block;margin-bottom:12px;">'
+        f'🤖 NLP Model: <b>{model_used}</b></div>',
+        unsafe_allow_html=True,
+    )
 
-    overall_colors = {"Positive": "#10b981", "Negative": "#ef4444", "Neutral": "#eab308"}
-    oc = overall_colors.get(agg["overall_label"], "#eab308")
+    # ── Summary metrics ───────────────────────────────────────────────────────
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    oc_map = {"Positive": "#10b981", "Negative": "#ef4444", "Neutral": "#eab308"}
+    oc     = oc_map.get(agg["overall_label"], "#eab308")
 
     with mc1:
         st.metric("Articles (24h)", agg["total_articles"])
     with mc2:
-        st.metric(
-            "Weighted Sentiment",
-            f"{agg['weighted_score']:+.4f}",
-            agg["overall_label"],
-        )
+        st.metric("Weighted Sentiment", f"{agg['weighted_score']:+.4f}", agg["overall_label"])
     with mc3:
         st.metric(
             "Distribution",
-            f"🟢{agg['pct_positive']:.0f}% 🔴{agg['pct_negative']:.0f}% ⚪{agg['pct_neutral']:.0f}%",
+            f"🟢{agg['pct_positive']:.0f}%  🔴{agg['pct_negative']:.0f}%  ⚪{agg['pct_neutral']:.0f}%",
         )
     with mc4:
-        alignment_colors = {
-            "Agreement":      "#10b981",
-            "Mild Conflict":  "#eab308",
-            "Strong Conflict":"#ef4444",
-            "Neutral":        "#64748b",
+        align_color_map = {
+            "Agreement":       "#10b981",
+            "Mild Conflict":   "#eab308",
+            "Strong Conflict": "#ef4444",
+            "Neutral":         "#64748b",
         }
-        ac = alignment_colors.get(reconciled["alignment"], "#64748b")
         st.metric(
             "Model Alignment",
             reconciled["alignment"],
             f"Conf: {reconciled['adjusted_conf']:.1f}% ({reconciled['delta_conf']:+.0f}pp)",
         )
 
-    # ── Conflict Warning ──────────────────────────────────────────────────────
     if reconciled["warning"]:
         st.warning(reconciled["warning"])
 
-    # ── Overall Sentiment Banner ──────────────────────────────────────────────
+    # ── Overall sentiment banner ──────────────────────────────────────────────
     strength_icon = {"Strong": "🔥", "Moderate": "📊", "Weak": "🌤️"}.get(
         agg["signal_strength"], "📊"
     )
-    st.markdown(
-        f"""
-        <div style="
-            background: #111827;
-            border-left: 5px solid {oc};
-            border-radius: 0 14px 14px 0;
-            padding: 18px 24px;
-            margin: 16px 0;
-            display: flex;
-            align-items: center;
-            gap: 20px;
-        ">
-            <div style="font-size: 2.4rem;">{strength_icon}</div>
-            <div>
-                <div style="font-size: 0.72rem; color: #64748b; letter-spacing: 0.1em;
-                            text-transform: uppercase; margin-bottom: 4px;">
-                    Overall Sentiment Signal
-                </div>
-                <div style="font-size: 1.5rem; font-weight: 800; color: {oc};">
-                    {agg['signal_strength']} {agg['overall_label']}
-                </div>
-                <div style="font-size: 0.8rem; color: #94a3b8; margin-top: 4px;">
-                    Score: {agg['weighted_score']:+.4f} &nbsp;·&nbsp;
-                    Based on {agg['total_articles']} articles in last 24h &nbsp;·&nbsp;
-                    FinBERT 70% + VADER 30%
-                </div>
+    st.markdown(f"""
+    <div style="background:#111827;border-left:5px solid {oc};
+                border-radius:0 14px 14px 0;padding:18px 24px;margin:16px 0;
+                display:flex;align-items:center;gap:20px;">
+        <div style="font-size:2.4rem;">{strength_icon}</div>
+        <div>
+            <div style="font-size:0.72rem;color:#64748b;letter-spacing:0.1em;
+                        text-transform:uppercase;margin-bottom:4px;">
+                Overall Sentiment Signal
+            </div>
+            <div style="font-size:1.5rem;font-weight:800;color:{oc};">
+                {agg['signal_strength']} {agg['overall_label']}
+            </div>
+            <div style="font-size:0.8rem;color:#94a3b8;margin-top:4px;">
+                Score: {agg['weighted_score']:+.4f} &nbsp;·&nbsp;
+                {agg['total_articles']} articles (24 h) &nbsp;·&nbsp;
+                {model_used}
             </div>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    </div>
+    """, unsafe_allow_html=True)
 
-    st.markdown("<hr style='border-color:#1e2d4a; margin:20px 0'>", unsafe_allow_html=True)
+    st.markdown("<hr style='border-color:#1e2d4a;margin:20px 0'>", unsafe_allow_html=True)
 
-    # ── Headlines Feed ────────────────────────────────────────────────────────
+    # ── Headlines feed ────────────────────────────────────────────────────────
     st.markdown("#### 📰 Live Financial Headlines")
 
     if no_data:
-        st.info("📭 No recent news available or RSS fetch failed.")
-        st.markdown(
-            """
-            <div class="card" style="border-color:#1e3a5f">
-                <div class="card-title">ℹ️ Setup Note</div>
-                <div style="color:#94a3b8; font-size:0.85rem; line-height:1.7">
-                    Install dependencies: <code>pip install feedparser vaderSentiment transformers torch</code><br>
-                    FinBERT model will be downloaded automatically on first run (~500MB).
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        st.info("📭 No recent news found. Check RSS connectivity or install feedparser.")
     else:
         lbl_colors = {"Positive": "#10b981", "Negative": "#ef4444", "Neutral": "#eab308"}
-        border_colors = {"Positive": "#10b981", "Negative": "#ef4444", "Neutral": "#eab308"}
 
         for art in articles:
-            lbl   = art["sentiment_label"]
-            score = art["combined_score"]
-            clr   = lbl_colors.get(lbl,    "#eab308")
-            bclr  = border_colors.get(lbl, "#1e3a5f")
-            fb    = art.get("finbert_score", 0.0)
-            vd    = art.get("vader_score",   0.0)
-
-            # Format timestamp
-            dt = art.get("published_dt")
-            ts = dt.strftime("%d %b %Y, %H:%M UTC") if dt else "Unknown time"
-
-            # Score bar (0–100 mapped from -1..+1)
+            lbl     = art.get("sentiment_label", "Neutral")
+            score   = art.get("combined_score",  0.0)
+            clr     = lbl_colors.get(lbl, "#eab308")
+            fb      = art.get("finbert_score")            # may be None — guard below
+            vd      = art.get("vader_score", 0.0)
+            dt      = art.get("published_dt")
+            ts      = dt.strftime("%d %b %Y, %H:%M UTC") if dt else "Unknown time"
             bar_pct = int((score + 1) / 2 * 100)
-            bar_clr = clr
 
-            st.markdown(
-                f"""
-                <div style="
-                    background: #111827;
-                    border-left: 4px solid {bclr};
-                    border-radius: 0 12px 12px 0;
-                    padding: 14px 18px;
-                    margin-bottom: 10px;
-                ">
-                    <div style="color: #e2e8f0; font-size: 0.9rem; font-weight: 600;
-                                margin-bottom: 6px;">{art['title']}</div>
-                    <div style="color: #64748b; font-size: 0.72rem; margin-bottom: 8px;">
-                        🕐 {ts} &nbsp;·&nbsp; 📰 {art.get('source','Unknown')}
-                    </div>
-                    <div style="height: 6px; background: #1e2d4a; border-radius: 3px;
-                                overflow: hidden; margin-bottom: 8px;">
-                        <div style="height: 100%; width: {bar_pct}%;
-                                    background: {bar_clr}; border-radius: 3px;"></div>
-                    </div>
-                    <div style="font-size: 0.75rem; display: flex; gap: 16px; flex-wrap: wrap;">
-                        <span>FinBERT: <b style="color:#a78bfa">{fb:+.4f}</b></span>
-                        <span>VADER: <b style="color:#38bdf8">{vd:+.4f}</b></span>
-                        <span>Combined: <b style="color:#e2e8f0">{score:+.4f}</b></span>
-                        <span style="color:{clr}; font-weight:700">{lbl}</span>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
+            # FinBERT column — show N/A when not computed
+            fb_html = (
+                f'<span>FinBERT: <b style="color:#a78bfa">{fb:+.4f}</b></span>'
+                if fb is not None
+                else '<span style="color:#3d444d;font-size:0.68rem;">FinBERT: N/A</span>'
             )
 
-    st.markdown("<hr style='border-color:#1e2d4a; margin:20px 0'>", unsafe_allow_html=True)
+            st.markdown(f"""
+            <div style="background:#111827;border-left:4px solid {clr};
+                        border-radius:0 12px 12px 0;padding:14px 18px;margin-bottom:10px;">
+                <div style="color:#e2e8f0;font-size:0.9rem;font-weight:600;
+                            margin-bottom:6px;">{art['title']}</div>
+                <div style="color:#64748b;font-size:0.72rem;margin-bottom:8px;">
+                    🕐 {ts} &nbsp;·&nbsp; 📰 {art.get('source','Unknown')}
+                </div>
+                <div style="height:6px;background:#1e2d4a;border-radius:3px;
+                            overflow:hidden;margin-bottom:8px;">
+                    <div style="height:100%;width:{bar_pct}%;
+                                background:{clr};border-radius:3px;"></div>
+                </div>
+                <div style="font-size:0.75rem;display:flex;gap:16px;flex-wrap:wrap;">
+                    {fb_html}
+                    <span>VADER: <b style="color:#38bdf8">{vd:+.4f}</b></span>
+                    <span>Combined: <b style="color:#e2e8f0">{score:+.4f}</b></span>
+                    <span style="color:{clr};font-weight:700">{lbl}</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
-    # ── Sentiment Distribution Chart ──────────────────────────────────────────
-    col_pie, col_bar = st.columns([1, 1])
+    st.markdown("<hr style='border-color:#1e2d4a;margin:20px 0'>", unsafe_allow_html=True)
 
-    with col_pie:
-        st.markdown("#### 🥧 Sentiment Distribution")
-        if agg["total_articles"] > 0:
+    # ── Charts (Plotly optional) ──────────────────────────────────────────────
+    if _PLOTLY and agg["total_articles"] > 0:
+        col_pie, col_bar = st.columns([1, 1])
+
+        with col_pie:
+            st.markdown("#### 🥧 Sentiment Distribution")
             pos_n = round(agg["pct_positive"] / 100 * agg["total_articles"])
             neg_n = round(agg["pct_negative"] / 100 * agg["total_articles"])
-            neu_n = agg["total_articles"] - pos_n - neg_n
+            neu_n = max(agg["total_articles"] - pos_n - neg_n, 0)
             fig_pie = go.Figure(go.Pie(
                 labels=["Positive", "Negative", "Neutral"],
-                values=[max(pos_n, 0), max(neg_n, 0), max(neu_n, 0)],
+                values=[max(pos_n, 0), max(neg_n, 0), neu_n],
                 marker_colors=["#10b981", "#ef4444", "#eab308"],
-                hole=0.55,
-                textfont_size=13,
+                hole=0.55, textfont_size=13,
             ))
             fig_pie.update_layout(
-                paper_bgcolor="#0a0e1a",
-                font_color="#e2e8f0",
-                height=280,
-                margin=dict(l=0, r=0, t=20, b=0),
+                paper_bgcolor="#0a0e1a", font_color="#e2e8f0",
+                height=280, margin=dict(l=0, r=0, t=20, b=0),
                 legend=dict(bgcolor="#111827"),
             )
             st.plotly_chart(fig_pie, use_container_width=True)
-        else:
-            st.info("No data for chart.")
 
-    with col_bar:
-        st.markdown("#### 📊 Score Distribution")
-        if articles:
-            score_vals = [a["combined_score"] for a in articles]
-            score_clrs = [
-                "#10b981" if s >= 0.1 else ("#ef4444" if s <= -0.1 else "#eab308")
-                for s in score_vals
-            ]
-            titles_short = [
-                (a["title"][:38] + "…") if len(a["title"]) > 40 else a["title"]
-                for a in articles
-            ]
-            fig_bar = go.Figure(go.Bar(
-                x=score_vals,
-                y=titles_short,
-                orientation="h",
-                marker_color=score_clrs,
-                text=[f"{s:+.3f}" for s in score_vals],
-                textposition="outside",
-                textfont_color="#e2e8f0",
-            ))
-            fig_bar.add_vline(x=0, line_dash="dash", line_color="#475569", line_width=1)
-            fig_bar.update_layout(
-                paper_bgcolor="#0a0e1a",
-                plot_bgcolor="#0a0e1a",
-                font_color="#e2e8f0",
-                height=max(280, len(articles) * 30),
-                margin=dict(l=0, r=60, t=20, b=0),
-                showlegend=False,
-                xaxis=dict(gridcolor="#1e2d4a", range=[-1.1, 1.1]),
-                yaxis=dict(gridcolor="#1e2d4a", automargin=True),
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
-        else:
-            st.info("No articles scored yet.")
+        with col_bar:
+            st.markdown("#### 📊 Score Distribution")
+            if articles:
+                score_vals   = [a.get("combined_score", 0.0) for a in articles]
+                score_clrs   = [
+                    "#10b981" if s >= 0.1 else ("#ef4444" if s <= -0.1 else "#eab308")
+                    for s in score_vals
+                ]
+                titles_short = [
+                    (a["title"][:38] + "…") if len(a["title"]) > 40 else a["title"]
+                    for a in articles
+                ]
+                fig_bar = go.Figure(go.Bar(
+                    x=score_vals, y=titles_short, orientation="h",
+                    marker_color=score_clrs,
+                    text=[f"{s:+.3f}" for s in score_vals],
+                    textposition="outside", textfont_color="#e2e8f0",
+                ))
+                fig_bar.add_vline(x=0, line_dash="dash", line_color="#475569", line_width=1)
+                fig_bar.update_layout(
+                    paper_bgcolor="#0a0e1a", plot_bgcolor="#0a0e1a", font_color="#e2e8f0",
+                    height=max(280, len(articles) * 30),
+                    margin=dict(l=0, r=60, t=20, b=0), showlegend=False,
+                    xaxis=dict(gridcolor="#1e2d4a", range=[-1.1, 1.1]),
+                    yaxis=dict(gridcolor="#1e2d4a", automargin=True),
+                )
+                st.plotly_chart(fig_bar, use_container_width=True)
 
-    st.markdown("<hr style='border-color:#1e2d4a; margin:20px 0'>", unsafe_allow_html=True)
+    st.markdown("<hr style='border-color:#1e2d4a;margin:20px 0'>", unsafe_allow_html=True)
 
-    # ── Model × Sentiment Reconciliation Panel ────────────────────────────────
+    # ── ML × Sentiment reconciliation panel ──────────────────────────────────
     st.markdown("#### 🤝 ML Prediction × Sentiment Reconciliation")
 
-    align_icon = {
-        "Agreement":      "✅",
-        "Mild Conflict":  "⚠️",
-        "Strong Conflict":"🚨",
-        "Neutral":        "⚪",
-    }.get(reconciled["alignment"], "⚪")
+    align_icon   = {"Agreement": "✅", "Mild Conflict": "⚠️",
+                    "Strong Conflict": "🚨", "Neutral": "⚪"}.get(reconciled["alignment"], "⚪")
+    align_bg     = {"Agreement": "#064e3b", "Mild Conflict": "#3b3406",
+                    "Strong Conflict": "#450a0a", "Neutral": "#1e2d4a"}.get(reconciled["alignment"], "#1e2d4a")
+    align_border = {"Agreement": "#10b981", "Mild Conflict": "#eab308",
+                    "Strong Conflict": "#ef4444", "Neutral": "#38bdf8"}.get(reconciled["alignment"], "#38bdf8")
+    dsign        = "+" if reconciled["delta_conf"] >= 0 else ""
 
-    align_bg = {
-        "Agreement":      "#064e3b",
-        "Mild Conflict":  "#3b3406",
-        "Strong Conflict":"#450a0a",
-        "Neutral":        "#1e2d4a",
-    }.get(reconciled["alignment"], "#1e2d4a")
-
-    align_border = {
-        "Agreement":      "#10b981",
-        "Mild Conflict":  "#eab308",
-        "Strong Conflict":"#ef4444",
-        "Neutral":        "#38bdf8",
-    }.get(reconciled["alignment"], "#38bdf8")
-
-    delta_sign = "+" if reconciled["delta_conf"] >= 0 else ""
-
-    st.markdown(
-        f"""
-        <div style="
-            background: {align_bg};
-            border: 2px solid {align_border};
-            border-radius: 16px;
-            padding: 28px;
-            margin-bottom: 16px;
-        ">
-            <div style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
-                <div style="font-size: 2.8rem;">{align_icon}</div>
-                <div style="flex: 1; min-width: 200px;">
-                    <div style="font-size: 1.2rem; font-weight: 800;
-                                color: {align_border}; margin-bottom: 6px;">
-                        {reconciled['alignment']}
-                    </div>
-                    <div style="color: #cbd5e1; font-size: 0.88rem; line-height: 1.6;">
-                        Model Signal: <b style="color:#e2e8f0">{reconciled['final_signal']}</b>
-                        &nbsp;|&nbsp;
-                        Sentiment: <b style="color:{align_border}">{reconciled['sentiment_label']}</b>
-                        (score: {reconciled['sentiment_score']:+.4f})
-                    </div>
+    st.markdown(f"""
+    <div style="background:{align_bg};border:2px solid {align_border};
+                border-radius:16px;padding:28px;margin-bottom:16px;">
+        <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+            <div style="font-size:2.8rem;">{align_icon}</div>
+            <div style="flex:1;min-width:200px;">
+                <div style="font-size:1.2rem;font-weight:800;
+                            color:{align_border};margin-bottom:6px;">
+                    {reconciled['alignment']}
                 </div>
-                <div style="text-align: right; min-width: 140px;">
-                    <div style="font-size: 0.72rem; color: #64748b; text-transform: uppercase;
-                                letter-spacing: 0.08em;">Adjusted Confidence</div>
-                    <div style="font-size: 2rem; font-weight: 900; color: {align_border};">
-                        {reconciled['adjusted_conf']:.1f}%
-                    </div>
-                    <div style="font-size: 0.78rem; color: #94a3b8;">
-                        Original: {reconciled['original_conf']:.1f}%
-                        &nbsp;→&nbsp;
-                        <span style="color:{align_border}">
-                            {delta_sign}{reconciled['delta_conf']:.0f}pp
-                        </span>
-                    </div>
+                <div style="color:#cbd5e1;font-size:0.88rem;line-height:1.6;">
+                    Model: <b style="color:#e2e8f0">{reconciled['final_signal']}</b>
+                    &nbsp;|&nbsp;
+                    Sentiment: <b style="color:{align_border}">{reconciled['sentiment_label']}</b>
+                    (score: {reconciled['sentiment_score']:+.4f})
+                </div>
+            </div>
+            <div style="text-align:right;min-width:140px;">
+                <div style="font-size:0.72rem;color:#64748b;text-transform:uppercase;
+                            letter-spacing:0.08em;">Adjusted Confidence</div>
+                <div style="font-size:2rem;font-weight:900;color:{align_border};">
+                    {reconciled['adjusted_conf']:.1f}%
+                </div>
+                <div style="font-size:0.78rem;color:#94a3b8;">
+                    Original: {reconciled['original_conf']:.1f}%
+                    &nbsp;→&nbsp;
+                    <span style="color:{align_border}">
+                        {dsign}{reconciled['delta_conf']:.0f}pp
+                    </span>
                 </div>
             </div>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    </div>
+    """, unsafe_allow_html=True)
 
-    # ── Refresh Info ──────────────────────────────────────────────────────────
     st.markdown(
-        f"""
-        <div style="color: #475569; font-size: 0.72rem; text-align: right; margin-top: 8px;">
-            🔄 Pipeline: FinBERT (70%) + VADER (30%) · Cached 30min ·
-            Last run: {datetime.now().strftime('%H:%M:%S')} ·
-            Articles from last {HOURS_LOOKBACK}h
-        </div>
-        """,
+        f'<div style="color:#475569;font-size:0.72rem;text-align:right;margin-top:8px;">'
+        f'🔄 {model_used} · Cached 30 min · '
+        f'Last run: {datetime.now().strftime("%H:%M:%S")} · '
+        f'Articles from last {HOURS_LOOKBACK} h</div>',
         unsafe_allow_html=True,
     )
