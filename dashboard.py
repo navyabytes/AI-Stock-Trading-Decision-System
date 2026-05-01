@@ -983,7 +983,16 @@ def main() -> None:
 
     # ── Step 2: Sentiment loads progressively ─────────────────────────────────
     with st.spinner("Fetching and scoring news…"):
-        agg = run_sentiment_pipeline()
+        if "sentiment_loaded" not in st.session_state:
+            st.session_state.sentiment_loaded = False
+        
+        if not st.session_state.sentiment_loaded:
+            if st.button("Load Sentiment Analysis"):
+                st.session_state.sentiment_loaded = True
+                st.rerun()
+        
+        if st.session_state.sentiment_loaded:
+            agg = run_sentiment_pipeline()
 
     # Derive news_updated BEFORE rendering header so it shows correctly
     news_updated = ""
