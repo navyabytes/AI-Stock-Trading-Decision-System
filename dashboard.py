@@ -789,7 +789,7 @@ def render_charts(agg: dict) -> None:
         st.info("Charts unavailable (Plotly not installed)")
         return
 
-    articles = agg.get("articles", [])
+    articles = (agg or {}).get("articles", [])
     if not articles:
         return
 
@@ -992,7 +992,11 @@ def main() -> None:
                 st.rerun()
         
         if st.session_state.sentiment_loaded:
-            agg = run_sentiment_pipeline()
+            try:
+                result = run_sentiment_pipeline()
+                agg = result if isinstance(result, dict) else {}
+            except Exception:
+                agg = {}
 
     # Derive news_updated BEFORE rendering header so it shows correctly
     news_updated = ""
