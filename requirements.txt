@@ -3,7 +3,5 @@ pandas
 numpy
 scikit-learn
 nltk
-plotly
+plotly>=5.0.0
 feedparser
-transformers
-torch
