@@ -1,7 +1,9 @@
 streamlit
 pandas
 numpy
-yfinance
 scikit-learn
-feedparser
 nltk
+plotly
+feedparser
+transformers
+torch
